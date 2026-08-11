@@ -1,0 +1,12 @@
+{
+    "source-analyzed": {
+        "eventTitle": "Source analyzed",
+        "eventDescription": "One competitor or directory page was fetched fresh and its list extracted.",
+        "eventPriceUsd": 0.02
+    },
+    "candidate-found": {
+        "eventTitle": "Candidate found",
+        "eventDescription": "One candidate was written to the dataset.",
+        "eventPriceUsd": 0.02
+    }
+}

@@ -1,0 +1,42 @@
+{
+    "$schema": "https://apify.com/schemas/v1/input.ide.json",
+    "title": "Integration Radar",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "companyDomain": {
+            "title": "Company domain",
+            "type": "string",
+            "description": "The company to analyze, as a bare domain. Its competitors are read from its own alternatives page.",
+            "editor": "textfield",
+            "prefill": "apify.com",
+            "pattern": "^[a-z0-9.-]+\\.[a-z]{2,}$"
+        },
+        "maxCompetitors": {
+            "title": "Maximum competitors",
+            "type": "integer",
+            "description": "How many competitors to read. Alternatives pages are ordered by search volume, not relevance, so a low number tends to select the least relevant companies. 20 is a sensible floor.",
+            "editor": "number",
+            "default": 20,
+            "minimum": 1,
+            "maximum": 30
+        },
+        "directories": {
+            "title": "Integration directories",
+            "type": "array",
+            "description": "Large directories to harvest names from. Defaults are verified working; override to target a different ecosystem.",
+            "editor": "stringList",
+            "default": []
+        },
+        "minSources": {
+            "title": "Minimum sources per candidate",
+            "type": "integer",
+            "description": "Only report a name carried by at least this many sources. Raise it to cut noise.",
+            "editor": "number",
+            "default": 2,
+            "minimum": 1,
+            "maximum": 10
+        }
+    },
+    "required": ["companyDomain"]
+}
