@@ -38,14 +38,27 @@ export interface Candidate extends RawCandidate {
 // ---------- constants ----------
 
 /**
- * Verified in Task 2 Step 4. Replace this array with whatever actually returned
- * content — do not ship a URL that was not probed.
+ * Verified in Task 2 Step 4 (see task-2-report.md for full measurements). Every URL
+ * here returned >2,000 chars and >30 links on at least one probe. `composio.dev/tools`
+ * was dropped: both raw-http and browser-playwright returned the same 175 chars / 2
+ * links, so no engine clears the bar. `make.com` (0 chars raw-http) and
+ * `pipedream.com` (9 chars raw-http) need browser rendering — both cleared the bar
+ * under browser-playwright (18,261 chars/124 links and 6,705 chars/97 links) — the
+ * shipped fetch path retries thin raw-http results with a browser automatically, so
+ * both still qualify. `docs.llamaindex.ai` clears the bar only narrowly (3,649
+ * chars/39 links vs. the 2,000/30 minimums) and was kept anyway: the margin is still
+ * comfortable (+82%/+30%), not razor-thin, and it is the only AI-framework connector
+ * directory outside LangChain, so the added fetch cost (one call per uncached run)
+ * buys real coverage.
  */
 export const DEFAULT_DIRECTORIES: string[] = [
     'https://n8n.io/integrations/',
-    'https://python.langchain.com/docs/integrations/providers/',
-    'https://composio.dev/tools',
+    'https://zapier.com/apps',
+    'https://www.make.com/en/integrations',
     'https://pipedream.com/apps',
+    'https://python.langchain.com/docs/integrations/providers/',
+    'https://docs.llamaindex.ai/en/stable/module_guides/loading/connector/modules/',
+    'https://smithery.ai/',
 ];
 
 /**
