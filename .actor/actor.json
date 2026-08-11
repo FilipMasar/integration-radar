@@ -1,0 +1,14 @@
+{
+	"$schema": "https://apify.com/schemas/v1/actor.ide.json",
+	"actorSpecification": 1,
+	"name": "integration-radar",
+	"title": "Empty TypeScript project",
+	"description": "Empty project in TypeScript.",
+	"version": "0.0",
+	"buildTag": "latest",
+	"meta": {
+		"templateId": "ts-empty",
+		"generatedBy": "Claude Code with Claude Opus 5"
+	},
+	"dockerfile": "../Dockerfile"
+}
