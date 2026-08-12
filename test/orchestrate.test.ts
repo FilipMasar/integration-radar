@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Company, ListKind, PageHit } from '../src/pure.js';
-import { inputFingerprint } from '../src/pure.js';
+import { DEFAULT_DIRECTORIES, inputFingerprint } from '../src/pure.js';
 import type { StoredMemory } from '../src/store.js';
 import type { Resolved } from '../src/web.js';
 // Type-only import: erased at compile time, so it needs no involvement from the
@@ -496,8 +496,68 @@ describe('runIntegrationRadar — charging', () => {
 
         const summary = await runIntegrationRadar(BASE_INPUT, deps);
 
-        expect(summary.chargeLimitReached).toBe(true);
+        expect(summary.chargingState).toBe('capped');
         expect(summary.chargedEvents).toBe(2); // one per capped call, not the counts requested
+    });
+
+    it('reports a partial charge as capped even when the platform did not set the limit flag', async () => {
+        // A partial charge is a cap by construction: something was billed and it was less
+        // than requested. The flag must not be the only thing that can produce 'capped'.
+        const deps = baseDeps({
+            charge: vi.fn(async () => ({ chargedCount: 1, eventChargeLimitReached: false })),
+        });
+
+        const summary = await runIntegrationRadar(BASE_INPUT, deps);
+        expect(summary.chargingState).toBe('capped');
+        expect(summary.chargedEvents).toBe(2);
+    });
+
+    it('reports a fully refused charge as capped when the platform set the limit flag', async () => {
+        // Zero charged is only "inactive" when the platform also reports no limit. With
+        // the flag set it is a real budget event and must not be reported as a non-PPE run.
+        const deps = baseDeps({
+            charge: vi.fn(async () => ({ chargedCount: 0, eventChargeLimitReached: true })),
+        });
+
+        const summary = await runIntegrationRadar(BASE_INPUT, deps);
+        expect(summary.chargingState).toBe('capped');
+        expect(summary.chargedEvents).toBe(0);
+    });
+
+    it('reports a non-pay-per-event run as inactive, not as a budget cap', async () => {
+        // The SDK no-ops Actor.charge on a non-PPE run and on a local run without
+        // ACTOR_TEST_PAY_PER_EVENT, returning chargedCount 0 with no limit reached.
+        // Reading that as "the user hit their max-charge limit" misattributes the cause
+        // and contradicts the run's own summary, which correctly reports no cap. Both
+        // live verification runs emitted exactly that contradiction.
+        const deps = baseDeps({
+            charge: vi.fn(async () => ({ chargedCount: 0, eventChargeLimitReached: false })),
+        });
+
+        const summary = await runIntegrationRadar(BASE_INPUT, deps);
+        expect(summary.chargingState).toBe('inactive');
+        expect(summary.chargedEvents).toBe(0);
+    });
+
+    it('reports no charging state at all when nothing was chargeable', async () => {
+        const deps = baseDeps({
+            findList: vi.fn(async (domain: string, kind: ListKind): Promise<Resolved> => {
+                if (domain === 'mine.com' && kind === 'alternatives') {
+                    return resolved({ hit: hit('https://mine.com/alternatives'), key: 'alt', fromCache: true });
+                }
+                if (domain === 'mine.com' && kind === 'integrations') {
+                    return resolved({ hit: hit('https://mine.com/integrations'), key: 'own', fromCache: true });
+                }
+                if (domain === 'rival.com') {
+                    return resolved({ hit: hit('https://rival.com/integrations'), key: 'rival', fromCache: true });
+                }
+                return resolved({ hit: null, key: `${domain}-${kind}` });
+            }),
+            extractNames: vi.fn(async (): Promise<string[]> => ['Existing Thing']),
+        });
+
+        const summary = await runIntegrationRadar(BASE_INPUT, deps);
+        expect(summary.chargingState).toBe('none');
     });
 
     it('does not call charge at all when there is nothing to charge for', async () => {
@@ -567,6 +627,28 @@ describe('runIntegrationRadar — cache reuse at the orchestration layer', () =>
         const deps = baseDeps();
         await runIntegrationRadar(BASE_INPUT, deps);
         expect(deps.writeCompetitors).toHaveBeenCalledWith('alt', [{ name: 'Rival', domain: 'rival.com' }]);
+    });
+
+    it('caches freshly extracted names against the page record they came from', async () => {
+        // Asserted positively, not just "not called on a cache hit": deleting the
+        // writeNames call entirely leaves the read side working and permanently defeats
+        // the names cache — the single biggest cost line in a run — with no test failing.
+        const deps = baseDeps();
+        await runIntegrationRadar(BASE_INPUT, deps);
+
+        expect(deps.writeNames).toHaveBeenCalledWith('own', ['Existing Thing']);
+        expect(deps.writeNames).toHaveBeenCalledWith('rival', ['Candidate One']);
+    });
+
+    it('does not cache an empty extraction, which would read back as a page with no names', async () => {
+        const deps = baseDeps({
+            extractNames: vi.fn(async (page: PageHit): Promise<string[]> =>
+                page.url.includes('mine.com') ? ['Existing Thing'] : [],
+            ),
+        });
+
+        await expect(runIntegrationRadar(BASE_INPUT, deps)).rejects.toThrow('No source lists could be read.');
+        expect(deps.writeNames).not.toHaveBeenCalledWith('rival', expect.anything());
     });
 
     it('honours a cached rejection without calling the LLM gate again', async () => {
@@ -755,5 +837,123 @@ describe('runIntegrationRadar — one namespace for peer and directory sources',
         // A mere reordering of the model's output used to swap which competitors were
         // read, taking the dropped one's candidates out of the run's evidence with it.
         expect(await runWith([...forwards].reverse())).toEqual(await runWith(forwards));
+    });
+});
+
+describe('runIntegrationRadar — the directory pass', () => {
+    /** Deps whose one competitor is `zapier.com` and whose one directory is zapier's. */
+    function collidingDeps(peerResolves: boolean, overrides: Partial<Deps> = {}): Deps {
+        return baseDeps({
+            extractCompetitors: vi.fn(async (): Promise<Company[]> => [{ name: 'Zapier', domain: 'zapier.com' }]),
+            findList: vi.fn(async (domain: string, kind: ListKind): Promise<Resolved> => {
+                if (domain === 'mine.com' && kind === 'alternatives') {
+                    return resolved({ hit: hit('https://mine.com/alternatives'), key: 'alt' });
+                }
+                if (domain === 'mine.com' && kind === 'integrations') {
+                    return resolved({ hit: hit('https://mine.com/integrations'), key: 'own' });
+                }
+                // The competitor URL is a *guess* (https://zapier.com/integrations, then a
+                // site-scoped search); the directory URL is hand-verified. The guess is
+                // what fails here.
+                return peerResolves
+                    ? resolved({ hit: hit('https://zapier.com/integrations'), key: 'zapier-peer' })
+                    : resolved({ hit: null, key: 'zapier-peer' });
+            }),
+            fetchUrl: vi.fn(async (url: string): Promise<Resolved> => resolved({ hit: hit(url), key: url })),
+            extractNames: vi.fn(async (page: PageHit): Promise<string[]> =>
+                page.url.includes('mine.com') ? ['Existing Thing'] : ['Only Zapier Has This'],
+            ),
+            ...overrides,
+        });
+    }
+
+    const ZAPIER_DIR = 'https://zapier.com/apps';
+
+    it('still reads a directory whose competitor failed to resolve', async () => {
+        // The coverage regression the dedup introduced: filtering directories against the
+        // RAW competitor list dropped zapier.com/apps before it was fetched and replaced
+        // it with a competitor URL guess. When that guess resolves to nothing — which is
+        // exactly what happens for a domain with no /integrations page — the source was
+        // lost outright rather than deduplicated. For an automation-platform user this
+        // silently removes three of the seven verified default directories.
+        const deps = collidingDeps(false);
+        const summary = await runIntegrationRadar({ ...BASE_INPUT, directories: [ZAPIER_DIR] }, deps);
+
+        expect(deps.fetchUrl).toHaveBeenCalledWith(ZAPIER_DIR);
+        expect(summary.rows.map((r) => r.slug)).toEqual(['only-zapier-has-this']);
+    });
+
+    it('drops the directory when the same domain DID resolve as a competitor', async () => {
+        // The dedup itself still has to work: one page of names must not count as two
+        // independent sources.
+        const deps = collidingDeps(true);
+        const summary = await runIntegrationRadar({ ...BASE_INPUT, directories: [ZAPIER_DIR] }, deps);
+
+        expect(deps.fetchUrl).not.toHaveBeenCalled();
+        const row = summary.rows.find((r) => r.slug === 'only-zapier-has-this');
+        expect(row?.peerCount).toBe(1);
+        expect(row?.directoryCount).toBe(0);
+    });
+
+    it('never reads the analyzed company itself as a directory', async () => {
+        // Its own names are what the diff subtracts; counting them as a source would let
+        // the company's own page carry a candidate toward minSources.
+        const deps = baseDeps({
+            fetchUrl: vi.fn(async (url: string): Promise<Resolved> => resolved({ hit: hit(url), key: url })),
+        });
+
+        await runIntegrationRadar({ ...BASE_INPUT, directories: ['https://www.mine.com/integrations'] }, deps);
+        expect(deps.fetchUrl).not.toHaveBeenCalled();
+    });
+
+    it('does not charge source-analyzed for a directory served from cache', async () => {
+        // The one `!resolved.fromCache` guard with no coverage: no test returned a
+        // fetchUrl result that was both a hit and cached, so deleting the directory
+        // branch's guard billed the user for every cached directory on every warm run
+        // and passed the whole suite.
+        const chargeSpy = vi.fn(async (event: { eventName: string; count: number }) => ({
+            chargedCount: event.count,
+            eventChargeLimitReached: false,
+        }));
+        const deps = baseDeps({
+            charge: chargeSpy,
+            fetchUrl: vi.fn(
+                async (url: string): Promise<Resolved> => resolved({ hit: hit(url), key: url, fromCache: true }),
+            ),
+            extractNames: vi.fn(async (page: PageHit): Promise<string[]> =>
+                page.url.includes('mine.com') ? ['Existing Thing'] : ['Candidate One'],
+            ),
+        });
+
+        const summary = await runIntegrationRadar(BASE_INPUT, deps);
+
+        // alt + own + rival are fresh; the directory is cached and must not be counted.
+        expect(summary.freshSources).toBe(3);
+        expect(chargeSpy).toHaveBeenCalledWith({ eventName: 'source-analyzed', count: 3 });
+    });
+});
+
+describe('runIntegrationRadar — the fingerprint covers the effective directories', () => {
+    it('treats an empty directories list and the seven defaults as the same question', async () => {
+        // `directories: []` means "use DEFAULT_DIRECTORIES", so a Console user who submits
+        // the prefilled seven URLs is asking exactly what an API caller passing `[]` is.
+        // Fingerprinting `input.directories` instead of the resolved list splits those into
+        // two memory lineages and rebaselines on a change the user never made.
+        const deps = baseDeps({
+            loadPrevious: vi.fn(async () => ({
+                slugs: ['candidate-one'],
+                sources: ['rival.com'],
+                fingerprint: inputFingerprint({
+                    companyDomain: 'mine.com',
+                    maxCompetitors: 20,
+                    directories: DEFAULT_DIRECTORIES,
+                }),
+            })),
+        });
+
+        const summary = await runIntegrationRadar({ ...BASE_INPUT, directories: [] }, deps);
+
+        expect(summary.isBaseline).toBe(false);
+        expect(summary.rows.find((r) => r.slug === 'candidate-one')?.status).toBe('SEEN');
     });
 });

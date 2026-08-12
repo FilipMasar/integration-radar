@@ -30,7 +30,7 @@ Integration Radar takes one required field and three optional tuning knobs. See 
 |---|---|---|---|---|
 | `companyDomain` | string | Yes | — | The company to analyze, as a bare domain (e.g. `apify.com`). Its competitors are read from its own alternatives page. |
 | `maxCompetitors` | integer | No | `20` | How many competitors to read. When an alternatives page names more than this, the set is cut in a fixed alphabetical order, so the same page always selects the same competitors — a low number therefore drops real competitors arbitrarily, and 20 is a sensible floor. |
-| `directories` | array of strings | No | 7 built-in directories (n8n, Zapier, Make, Pipedream, LangChain, LlamaIndex, Smithery) | Large integration directories to harvest names from. Override to target a different ecosystem. A directory that is also one of the discovered competitors is read once, as a competitor, not twice. |
+| `directories` | array of strings | No | 7 built-in directories (n8n, Zapier, Make, Pipedream, LangChain, LlamaIndex, Smithery) | Large integration directories to harvest names from. Override to target a different ecosystem. A directory that is also one of the discovered competitors is read once, not twice — as that competitor if its integrations page resolves, and as the directory otherwise. |
 | `minSources` | integer | No | `2` | Only report a name carried by at least this many sources (competitors + directories combined). Raise it to cut noise. This filters the report only — every candidate found is remembered regardless, so turning this knob never fabricates a `NEW`. |
 
 ### Changing `maxCompetitors` or `directories` resets the comparison

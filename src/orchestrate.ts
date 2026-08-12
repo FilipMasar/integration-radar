@@ -57,9 +57,26 @@ export interface RunSummary {
     memoryReplaced: boolean;
     /** Events actually billed, which can be fewer than requested — see `chargeFor`. */
     chargedEvents: number;
-    /** True when the platform refused part of a charge because the run hit a budget cap. */
-    chargeLimitReached: boolean;
+    /** What the platform did with this run's charges — see `ChargeState`. */
+    chargingState: ChargeState;
 }
+
+/**
+ * What the platform did with an accumulated charge.
+ *
+ * The three cases have to be told apart, because two of them look identical in
+ * `chargedCount` alone and treating them the same produces a log line that contradicts
+ * its own run summary:
+ * - `charged`  — billed in full.
+ * - `capped`   — billed in part, or refused, because a max-charge limit was reached.
+ * - `inactive` — nothing billed and no limit reached, which is not a budget event at all:
+ *   the run is simply not pay-per-event. The SDK no-ops `Actor.charge` on a non-PPE run
+ *   and on a local run without `ACTOR_TEST_PAY_PER_EVENT=true`, returning
+ *   `chargedCount: 0`. Reading that as "the user hit their limit" misattributes the
+ *   cause, and on-platform that is a misleading operator signal.
+ * - `none`     — no charge was attempted (nothing fresh, no rows).
+ */
+export type ChargeState = 'charged' | 'capped' | 'inactive' | 'none';
 
 /**
  * The parts of the Apify SDK's `ChargeResult` this pipeline acts on. Typed structurally
@@ -142,26 +159,42 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     log.info('Starting', { companyDomain, maxCompetitors, minSources, directories: directories.length });
 
     /**
-     * Apply one accumulated charge and report what the platform actually billed.
+     * Apply one accumulated charge and classify what the platform did with it.
      *
      * Apify's docs are explicit that with the `count` parameter `chargedCount` may come
      * back lower than requested once the user's max-total-charge limit is reached, and
      * that a caller using `count` must check it. There is nothing to undo at this point
      * — the rows are already pushed, deliberately, so a user can never pay for a run
-     * that produced nothing — so the honest response is to say so loudly rather than
-     * let an under-charge pass silently.
+     * that produced nothing — so the honest response is to say so rather than let an
+     * under-charge pass silently.
+     *
+     * But an under-charge has two entirely different causes and only one of them is a
+     * budget event. `eventChargeLimitReached` is the platform's own signal that the
+     * limit was hit, and a partial (non-zero) charge is a cap by construction. A charge
+     * of *zero* with no limit reported is neither: it is the SDK no-op on a run that is
+     * not pay-per-event at all. Warning about a max-charge limit there both misstates
+     * the cause and contradicts this run's own summary, which correctly reports no cap.
      */
-    async function chargeFor(eventName: string, count: number): Promise<ChargeOutcome | null> {
+    async function chargeFor(
+        eventName: string,
+        count: number,
+    ): Promise<{ outcome: ChargeOutcome; state: ChargeState } | null> {
         if (count <= 0) return null;
-        const result = await deps.charge({ eventName, count });
-        if (result.chargedCount < count) {
-            log.warning('Charged fewer events than requested — the run hit a max-charge limit', {
-                eventName,
-                requested: count,
-                charged: result.chargedCount,
-            });
+        const outcome = await deps.charge({ eventName, count });
+
+        if (outcome.chargedCount >= count) return { outcome, state: 'charged' };
+
+        if (outcome.chargedCount === 0 && !outcome.eventChargeLimitReached) {
+            log.info('Charging is not active for this run — nothing was billed', { eventName, requested: count });
+            return { outcome, state: 'inactive' };
         }
-        return result;
+
+        log.warning('Charged fewer events than requested — a max-charge limit was reached', {
+            eventName,
+            requested: count,
+            charged: outcome.chargedCount,
+        });
+        return { outcome, state: 'capped' };
     }
 
     /**
@@ -266,15 +299,37 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     //    across two consecutive runs).
     const tierBySource = new Map<string, 'path' | 'search'>();
 
+    const peerResults = await mapLimit(competitors, CONCURRENCY, async (competitor) => {
+        const resolved = await confirmed(await deps.findList(competitor.domain, 'integrations'), 'integrations');
+        if (!resolved.hit) return null;
+        const names = await namesFor(resolved);
+        if (names.length === 0) return null;
+        if (!resolved.fromCache) freshSources += 1;
+        const name = sourceName(competitor.domain);
+        if (resolved.tier) tierBySource.set(name, resolved.tier);
+        return { name, kind: 'peer' as const, names };
+    });
+    const peers = partitionResolved(peerResults);
+
     // Peer and directory names live in ONE namespace (`sourceName`), so a domain that is
     // both a competitor and a directory must not be read twice — `zapier.com` in both
     // roles used to yield `peerCount 1 + directoryCount 1 = 2` from a single page of
     // names, clearing the default `minSources: 2` on its own, and its directory pass
     // overwrote the peer's `'search'` tier in `tierBySource`, clearing `weakEvidence`.
-    // The peer wins: `peerCount` is the primary ranking key and the competitor set is
-    // what the user actually asked about. Dropping the duplicate here rather than
-    // deduping afterwards also saves the fetch.
-    const peerNames = new Set(competitors.map((c) => sourceName(c.domain)));
+    // The peer wins on a genuine collision: `peerCount` is the primary ranking key and
+    // the competitor set is what the user actually asked about.
+    //
+    // Filtered against the peers that RESOLVED, not against the raw competitor list, and
+    // therefore only after the peer pass has run. Filtering on the raw list turned this
+    // dedup into a coverage regression for exactly the user class it was raised about:
+    // for an automation platform, `zapier.com`, `make.com` and `pipedream.com` are all
+    // likely competitors *and* three of the seven verified DEFAULT_DIRECTORIES. Each was
+    // dropped before it was fetched and replaced by a competitor URL *guess*
+    // (`https://zapier.com/integrations`, then a site-scoped search) rather than the
+    // hand-verified directory URL this project measured — and if that guess resolved to
+    // nothing, the source was lost outright rather than deduplicated. A directory whose
+    // peer did not resolve is now still read, as a directory.
+    const peerNames = new Set(peers.items.map((p) => p.name));
     const effectiveDirectories = directories.filter((url) => {
         const name = sourceName(url);
         if (name === sourceName(companyDomain)) {
@@ -286,17 +341,6 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
             return false;
         }
         return true;
-    });
-
-    const peerResults = await mapLimit(competitors, CONCURRENCY, async (competitor) => {
-        const resolved = await confirmed(await deps.findList(competitor.domain, 'integrations'), 'integrations');
-        if (!resolved.hit) return null;
-        const names = await namesFor(resolved);
-        if (names.length === 0) return null;
-        if (!resolved.fromCache) freshSources += 1;
-        const name = sourceName(competitor.domain);
-        if (resolved.tier) tierBySource.set(name, resolved.tier);
-        return { name, kind: 'peer' as const, names };
     });
 
     const dirResults = await mapLimit(effectiveDirectories, CONCURRENCY, async (url) => {
@@ -315,7 +359,6 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     // Whether *every* source this run attempted resolved to a usable list. Reported and
     // logged so a reader can see how blind the run was; it is NOT what decides whether
     // memory is replaced — the evidence-base comparison in `mergeMemory` is.
-    const peers = partitionResolved(peerResults);
     const dirs = partitionResolved(dirResults);
     const fullCoverage = peers.fullCoverage && dirs.fullCoverage;
 
@@ -391,8 +434,13 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
         weakEvidence: gap.carriedBy.some((name) => tierBySource.get(name) === 'search'),
     }));
 
-    // 6. Publish first, then charge. A charge before the push means the user can pay
-    //    for a run that produced nothing.
+    // 6. Publish first, then charge, so a migration between the two can never leave the
+    //    user paying for rows they never received. Note the asymmetry this leaves, which
+    //    is deliberate: `candidate-found` is guarded by `rows.length > 0`, but
+    //    `source-analyzed` is charged for pages fetched fresh even on a run that produces
+    //    zero rows. That is not "paying for nothing" — the pages were genuinely fetched
+    //    and extracted, which is exactly what that event is advertised to bill for, and a
+    //    zero-row run is a real answer ("no gaps found"), not a failure.
     if (rows.length > 0) await deps.pushData(rows);
 
     // Carry-forward rule: never let a source that merely failed to resolve this run —
@@ -408,8 +456,17 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     });
     await deps.savePrevious(companyDomain, { ...memory, fingerprint }, runDate);
 
-    const sourceCharge = await chargeFor('source-analyzed', freshSources);
-    const candidateCharge = await chargeFor('candidate-found', rows.length);
+    const charges = [
+        await chargeFor('source-analyzed', freshSources),
+        await chargeFor('candidate-found', rows.length),
+    ].filter((c) => c !== null);
+
+    // Derived from the same classification the log lines use, so the summary and the log
+    // can never disagree about whether this run hit a budget cap.
+    const states = charges.map((c) => c.state);
+    const chargingState: ChargeState = states.includes('capped')
+        ? 'capped'
+        : (states.find((s) => s !== 'inactive') ?? states[0] ?? 'none');
 
     return {
         rows,
@@ -418,8 +475,7 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
         isBaseline,
         totalRanked: fullGaps.length,
         memoryReplaced,
-        chargedEvents: (sourceCharge?.chargedCount ?? 0) + (candidateCharge?.chargedCount ?? 0),
-        chargeLimitReached:
-            (sourceCharge?.eventChargeLimitReached ?? false) || (candidateCharge?.eventChargeLimitReached ?? false),
+        chargedEvents: charges.reduce((sum, c) => sum + c.outcome.chargedCount, 0),
+        chargingState,
     };
 }
