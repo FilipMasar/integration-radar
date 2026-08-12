@@ -12,6 +12,7 @@
                     "peerCount",
                     "directoryCount",
                     "status",
+                    "weakEvidence",
                     "carriedBy"
                 ]
             },
@@ -24,6 +25,7 @@
                     "peerCount": { "label": "Competitors", "format": "number" },
                     "directoryCount": { "label": "Directories", "format": "number" },
                     "status": { "label": "Status", "format": "text" },
+                    "weakEvidence": { "label": "Weak evidence", "format": "boolean" },
                     "carriedBy": { "label": "Found in", "format": "array" }
                 }
             }

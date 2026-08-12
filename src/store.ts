@@ -1,5 +1,6 @@
-import { Actor, log } from 'apify';
 import type { KeyValueStore } from 'apify';
+import { Actor, log } from 'apify';
+
 import type { PageHit } from './pure.js';
 
 /**
@@ -72,6 +73,11 @@ interface CacheRecord {
     hit: PageHit;
     /** Filled in after extraction, so a restarted run does not pay for the LLM twice. */
     names?: string[];
+    /**
+     * The search-tier `isListPage` gate's verdict on this page, cached the same way as
+     * `names` below — see `readListPageVerdict`/`writeListPageVerdict`.
+     */
+    isListPage?: boolean;
 }
 
 /** Returns null on a miss OR on an expired entry — expiry is what makes change detection possible. */
@@ -110,6 +116,46 @@ export async function readNames(key: string): Promise<string[] | null> {
         return null;
     }
     return record.names;
+}
+
+/**
+ * The search-tier list-page gate's verdict, cached against the same record as the page
+ * it judged — same shape and rationale as `readNames`/`writeNames` above.
+ *
+ * Added in fix round 1, after review: `main.ts` used to call `isListPage` on every
+ * search-tier hit unconditionally, including a page served straight from this cache.
+ * Re-running an LLM verdict on byte-identical content every run is not just wasted
+ * cost — at `temperature: 0` the verdict is *expected* to be stable but is not
+ * guaranteed to be (queued/routed inference is a known source of residual variance,
+ * and this codebase has already measured comparable flakiness one layer down, in
+ * `findList`'s search resolution itself). An accepted→rejected flip on unchanged
+ * content is silently absorbed by the carry-forward rule in `main.ts` (it just reads
+ * as "this source didn't resolve"), but a rejected→accepted flip has no safety net at
+ * all: it injects a spurious `NEW` sourced from nothing but model nondeterminism.
+ * Deciding once per cached page, not once per run, removes both the cost and this
+ * correctness risk.
+ *
+ * Returns `null` (not `false`) when no verdict has been cached yet, so a caller can
+ * tell "never gated" apart from "gated and rejected" — `false` is a real, meaningful
+ * cached answer, not an absence of one.
+ */
+export async function readListPageVerdict(key: string): Promise<boolean | null> {
+    const kv = await getStore();
+    const record = await kv.getValue<CacheRecord>(key);
+    if (!record || record.isListPage === undefined) return null;
+
+    if (isExpired(record.fetchedAt, ttlHours(process.env.CACHE_TTL_HOURS, DEFAULT_CACHE_TTL_HOURS))) {
+        return null;
+    }
+    return record.isListPage;
+}
+
+export async function writeListPageVerdict(key: string, isListPage: boolean): Promise<void> {
+    const kv = await getStore();
+    const record = await kv.getValue<CacheRecord>(key);
+    // Only ever attach to an existing page record — same rule as writeNames, and for
+    // the same reason: a verdict with no page behind it would outlive its source.
+    if (record) await kv.setValue(key, { ...record, isListPage });
 }
 
 export async function writeNames(key: string, names: string[]): Promise<void> {

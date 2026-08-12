@@ -1,5 +1,31 @@
-import { describe, expect, it } from 'vitest';
-import { cacheKey, isExpired, ttlHours } from '../src/store.js';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+/**
+ * `readListPageVerdict`/`writeListPageVerdict` (and `writeCache`, used here to seed a
+ * page record for them to attach to) go through `getStore()`, i.e. `Actor.
+ * openKeyValueStore(...)`, so this file needs a fake key-value store. `cacheKey`/
+ * `isExpired`/`ttlHours` above are pure and never touch `Actor`, so this mock is inert
+ * for them. The fake is a plain `Map` behind `getValue`/`setValue` — enough to exercise
+ * "attach to an existing record" / "no record yet" / "TTL expiry", the actual contracts
+ * these functions promise.
+ */
+const kvData = new Map<string, unknown>();
+
+vi.mock('apify', () => ({
+    Actor: {
+        openKeyValueStore: vi.fn(async () => ({
+            getValue: async (key: string) => kvData.get(key) ?? null,
+            setValue: async (key: string, value: unknown) => {
+                kvData.set(key, value);
+            },
+        })),
+    },
+    log: { info: vi.fn(), warning: vi.fn() },
+}));
+
+const { cacheKey, isExpired, readListPageVerdict, ttlHours, writeCache, writeListPageVerdict } = await import(
+    '../src/store.js'
+);
 
 describe('cacheKey', () => {
     it('strips the scheme', () => {
@@ -54,5 +80,50 @@ describe('isExpired', () => {
     it('treats TTL 0 as a forced expiry for any real past record', () => {
         const oneSecondAgo = new Date(Date.now() - 1000).toISOString();
         expect(isExpired(oneSecondAgo, 0)).toBe(true);
+    });
+});
+
+describe('readListPageVerdict / writeListPageVerdict', () => {
+    beforeEach(() => {
+        kvData.clear();
+    });
+
+    it('returns null when there is no page record at all', async () => {
+        expect(await readListPageVerdict('no-such-key')).toBeNull();
+    });
+
+    it('returns null — not false — when the page record exists but was never gated', async () => {
+        await writeCache('key-ungated', { url: 'https://example.com', markdown: 'hi' });
+        expect(await readListPageVerdict('key-ungated')).toBeNull();
+    });
+
+    it('round-trips a true verdict', async () => {
+        await writeCache('key-true', { url: 'https://example.com', markdown: 'hi' });
+        await writeListPageVerdict('key-true', true);
+        expect(await readListPageVerdict('key-true')).toBe(true);
+    });
+
+    it('round-trips a false verdict distinctly from "never gated"', async () => {
+        // The bug this guards against: an earlier draft could have used `record.isListPage`
+        // as a truthy check, which cannot tell a cached `false` apart from "no verdict yet"
+        // and would silently re-run the LLM gate on every rejected page forever.
+        await writeCache('key-false', { url: 'https://example.com', markdown: 'hi' });
+        await writeListPageVerdict('key-false', false);
+        expect(await readListPageVerdict('key-false')).toBe(false);
+    });
+
+    it('never attaches a verdict to a page record that does not exist', async () => {
+        await writeListPageVerdict('never-fetched', true);
+        expect(await readListPageVerdict('never-fetched')).toBeNull();
+    });
+
+    it('expires the verdict on the same TTL as the page record it is attached to', async () => {
+        const twentyFiveHoursAgo = new Date(Date.now() - 25 * 3_600_000).toISOString();
+        kvData.set('key-stale', {
+            fetchedAt: twentyFiveHoursAgo,
+            hit: { url: 'https://example.com', markdown: 'hi' },
+            isListPage: true,
+        });
+        expect(await readListPageVerdict('key-stale')).toBeNull();
     });
 });
