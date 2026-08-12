@@ -8,7 +8,6 @@ import {
     inputFingerprint,
     mapLimit,
     mergeMemory,
-    partitionResolved,
     rankCandidates,
     sourceName,
 } from './pure.js';
@@ -45,12 +44,6 @@ export interface OutputRow extends Candidate {
 export interface RunSummary {
     rows: OutputRow[];
     freshSources: number;
-    /**
-     * Whether every source this run *attempted* resolved. Observability only — a reader
-     * seeing `false` knows the run was partially blind. It is no longer what decides
-     * whether memory is replaced; see `mergeMemory` in `pure.ts`.
-     */
-    fullCoverage: boolean;
     isBaseline: boolean;
     totalRanked: number;
     /** True when memory superseded the stored one rather than being unioned into it. */
@@ -99,7 +92,7 @@ export interface ChargeOutcome {
  * it directly — no module mocking, no live Actor environment required.
  *
  * Pure helpers (`mapLimit`, `rankCandidates`, `diffAgainstPrevious`, `mergeMemory`,
- * `inputFingerprint`, `partitionResolved`) are NOT part of `Deps` — they're already directly testable and
+ * `inputFingerprint`) are NOT part of `Deps` — they're already directly testable and
  * already tested in `pure.test.ts`, so injecting them here would just be indirection.
  */
 export interface Deps {
@@ -309,7 +302,7 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
         if (resolved.tier) tierBySource.set(name, resolved.tier);
         return { name, kind: 'peer' as const, names };
     });
-    const peers = partitionResolved(peerResults);
+    const peers = peerResults.filter((r): r is NonNullable<typeof r> => r !== null);
 
     // Peer and directory names live in ONE namespace (`sourceName`), so a domain that is
     // both a competitor and a directory must not be read twice — `zapier.com` in both
@@ -329,7 +322,7 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     // hand-verified directory URL this project measured — and if that guess resolved to
     // nothing, the source was lost outright rather than deduplicated. A directory whose
     // peer did not resolve is now still read, as a directory.
-    const peerNames = new Set(peers.items.map((p) => p.name));
+    const peerNames = new Set(peers.map((p) => p.name));
     const effectiveDirectories = directories.filter((url) => {
         const name = sourceName(url);
         if (name === sourceName(companyDomain)) {
@@ -356,14 +349,10 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
         return { name, kind: 'directory' as const, names };
     });
 
-    // Whether *every* source this run attempted resolved to a usable list. Reported and
-    // logged so a reader can see how blind the run was; it is NOT what decides whether
-    // memory is replaced — the evidence-base comparison in `mergeMemory` is.
-    const dirs = partitionResolved(dirResults);
-    const fullCoverage = peers.fullCoverage && dirs.fullCoverage;
+    const dirs = dirResults.filter((r): r is NonNullable<typeof r> => r !== null);
 
-    const sources: SourceList[] = [...peers.items, ...dirs.items];
-    log.info('Sources read', { peers: peers.items.length, directories: dirs.items.length, fullCoverage });
+    const sources: SourceList[] = [...peers, ...dirs];
+    log.info('Sources read', { peers: peers.length, directories: dirs.length });
     if (sources.length === 0) throw new Error('No source lists could be read.');
 
     // A coverage guard. If our own page yielded far less than the sources we compare
@@ -471,7 +460,6 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     return {
         rows,
         freshSources,
-        fullCoverage,
         isBaseline,
         totalRanked: fullGaps.length,
         memoryReplaced,

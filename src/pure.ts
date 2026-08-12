@@ -260,22 +260,6 @@ export function diffAgainstPrevious(
 }
 
 /**
- * Splits `mapLimit`'s per-item results into the ones that resolved and a flag for
- * whether *every* item resolved.
- *
- * `fullCoverage` is observability only — it is logged and returned in `RunSummary` so a
- * reader can see how blind a run was. It is deliberately NOT the gate on replacing
- * memory any more; see `mergeMemory` for why "every source *attempted this run*
- * resolved" is the wrong question.
- */
-export function partitionResolved<T>(results: (T | null)[]): { items: T[]; fullCoverage: boolean } {
-    return {
-        items: results.filter((r): r is T => r !== null),
-        fullCoverage: results.every((r) => r !== null),
-    };
-}
-
-/**
  * Decides what to persist as "what we knew last run" for the next run's NEW/SEEN tag.
  *
  * **The problem.** Measured across three consecutive runs against identical domains:
@@ -290,7 +274,8 @@ export function partitionResolved<T>(results: (T | null)[]): { items: T[]; fullC
  * source that merely failed to resolve reads as "these integrations are new," which is
  * exactly backwards.
  *
- * **Why the old `fullCoverage` gate was not enough.** It certified that every source
+ * **Why an "every source attempted this run resolved" gate was not enough.** (That flag,
+ * `fullCoverage`, has since been removed; the argument is why.) It certified that every source
  * *attempted this run* resolved. It said nothing about whether this run attempted the
  * same sources as last run. A competitor dropped before the resolution loop even starts
  * — by `extractCompetitors` nondeterminism, by a `maxCompetitors` cut, or by the user
@@ -311,7 +296,7 @@ export function partitionResolved<T>(results: (T | null)[]): { items: T[]; fullC
  *
  * ---
  *
- * **What this gate certifies, and what it does not.** It is stronger than `fullCoverage`
+ * **What this gate certifies, and what it does not.** It is stronger than a bare coverage flag
  * against the three triggers above, but it is NOT strictly safer overall, and it does not
  * close the fabricated-`NEW` problem. Read the limits before trusting it further than
  * they allow.
@@ -327,7 +312,7 @@ export function partitionResolved<T>(results: (T | null)[]): { items: T[]; fullC
  *    LLM listing 95 names does not return the identical 95 every time.
  *
  *    **This class is newly reachable, and it is the trade this design makes.** Under
- *    `fullCoverage` the replace branch essentially never fired, so memory only ever grew
+ *    that coverage flag the replace branch essentially never fired, so memory only ever grew
  *    and content instability could not erase anything. This gate is *designed* to fire
  *    routinely — that is what makes the removal property real instead of aspirational —
  *    and firing routinely is exactly what makes this class live. The trade is: a class of

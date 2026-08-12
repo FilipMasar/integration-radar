@@ -9,7 +9,7 @@ import type { Deps, Input } from '../src/orchestrate.js';
 
 /**
  * Fix round 1, Important finding #2: `runIntegrationRadar`'s pure helpers
- * (`mergePreviousSlugs`, `partitionResolved`) were well tested in `pure.test.ts`, but
+ * (`mergePreviousSlugs`) were well tested in `pure.test.ts`, but
  * nothing exercised whether `main.ts` actually *called* them correctly — a reversion of
  * the `confirmed()` gate, or of the `savePrevious` call site back to the brief's own
  * original `gaps.map((g) => g.slug)`, would have passed all 91 tests that existed
@@ -64,8 +64,8 @@ function baseDeps(overrides: Partial<Deps> = {}): Deps {
             if (domain === 'rival.com' && kind === 'integrations') return resolved({ hit: rivalHit, key: 'rival' });
             return resolved({ hit: null, key: `${domain}-${kind}` });
         }),
-        // Unresolved by default: a test that wants the directory to count toward
-        // `fullCoverage` overrides this explicitly, so its contribution is never
+        // Unresolved by default: a test that wants the directory to resolve and
+        // contribute a source overrides this explicitly, so its contribution is never
         // accidental.
         fetchUrl: vi.fn(async (): Promise<Resolved> => resolved({ hit: null, key: 'fake-directory' })),
         extractCompetitors: vi.fn(async (): Promise<Company[]> => [{ name: 'Rival', domain: 'rival.com' }]),
@@ -210,8 +210,8 @@ describe('runIntegrationRadar — requirement 2: carry-forward on unresolved sou
 
         const summary = await runIntegrationRadar(BASE_INPUT, deps);
 
-        expect(summary.fullCoverage).toBe(false); // flaky.com did not resolve
-        expect(summary.memoryReplaced).toBe(false); // ...so memory is unioned, not superseded
+        // flaky.com did not resolve, so memory is unioned, not superseded.
+        expect(summary.memoryReplaced).toBe(false);
 
         // The naive bug this guards against: `savePrevious(companyDomain,
         // gaps.map((g) => g.slug), runDate)` — the brief's own original line — would
@@ -245,20 +245,18 @@ describe('runIntegrationRadar — critical fix: the display cap must not truncat
             maxRows: 2, // force truncation with a small, fast-to-verify pool
             savePrevious: savePreviousSpy,
             pushData: pushDataSpy,
-            // Full coverage requires the fixed directory to resolve too, not just the
-            // competitor — override the default "unresolved" fetchUrl explicitly.
+            // The fixed directory resolves too, not just the competitor — override the
+            // default "unresolved" fetchUrl explicitly.
             fetchUrl: vi.fn(async (url: string): Promise<Resolved> => resolved({ hit: hit(url), key: url })),
             extractNames: vi.fn(async (page: PageHit): Promise<string[]> => {
                 if (page.url === rivalHit.url) return fiveNames;
                 // The own page and the directory both just echo what the company
-                // already has, so both resolve (full coverage) without adding candidates.
+                // already has, so both resolve without adding candidates.
                 return ['Existing Thing'];
             }),
         });
 
         const summary = await runIntegrationRadar(BASE_INPUT, deps);
-
-        expect(summary.fullCoverage).toBe(true); // the competitor AND the directory both resolved fine
 
         // Display is capped: only the top 2 of 5 candidates are pushed and returned.
         expect(summary.rows).toHaveLength(2);
@@ -360,7 +358,7 @@ describe('runIntegrationRadar — memory describes the conditions it was gathere
     });
 
     it('does not replace memory when a competitor silently vanished from the extracted set', async () => {
-        // The Critical hole the old `fullCoverage` gate could not see: `extractCompetitors`
+        // The Critical hole the old coverage-flag gate could not see: `extractCompetitors`
         // returns one competitor fewer this run, so there is no unresolved entry at all —
         // the list is simply shorter, coverage reads "complete", and memory would be
         // replaced, erasing everything the departed competitor carried.
@@ -379,7 +377,6 @@ describe('runIntegrationRadar — memory describes the conditions it was gathere
         const summary = await runIntegrationRadar(BASE_INPUT, deps);
 
         // Everything this run attempted resolved — the old gate would have said "replace".
-        expect(summary.fullCoverage).toBe(true);
         expect(summary.memoryReplaced).toBe(false);
         const [, saved] = savePreviousSpy.mock.calls[0];
         expect(saved.slugs).toContain('gone-with-departed');
@@ -704,7 +701,7 @@ describe('runIntegrationRadar — cache reuse at the orchestration layer', () =>
     });
 });
 
-describe('runIntegrationRadar — weakEvidence and coverage composition', () => {
+describe('runIntegrationRadar — weakEvidence', () => {
     it('flags a candidate whose only support resolved via search, and not one that resolved via a path guess', async () => {
         const deps = baseDeps({
             extractCompetitors: vi.fn(async (): Promise<Company[]> => [
@@ -736,17 +733,6 @@ describe('runIntegrationRadar — weakEvidence and coverage composition', () => 
         // flips both of these.
         expect(summary.rows.find((r) => r.slug === 'search-only')?.weakEvidence).toBe(true);
         expect(summary.rows.find((r) => r.slug === 'path-only')?.weakEvidence).toBe(false);
-    });
-
-    it('reports incomplete coverage when the peers are all fine but a directory is not', async () => {
-        // `peers.fullCoverage && dirs.fullCoverage` — changing `&&` to `||` passes every
-        // other test in this file, because nothing else composes the two halves.
-        const deps = baseDeps({
-            fetchUrl: vi.fn(async (): Promise<Resolved> => resolved({ hit: null, key: 'dir' })),
-        });
-
-        const summary = await runIntegrationRadar(BASE_INPUT, deps);
-        expect(summary.fullCoverage).toBe(false);
     });
 });
 

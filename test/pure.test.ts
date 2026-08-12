@@ -5,7 +5,6 @@ import {
     mapLimit,
     mergeMemory,
     normalizeName,
-    partitionResolved,
     rankCandidates,
     sourceName,
 } from '../src/pure.js';
@@ -56,25 +55,6 @@ describe('diffAgainstPrevious', () => {
     it('does not resurrect candidates that have disappeared', () => {
         const tags = diffAgainstPrevious(['gone'], ['clay']);
         expect(tags.has('gone')).toBe(false);
-    });
-});
-
-describe('partitionResolved', () => {
-    it('keeps only the non-null results', () => {
-        const { items } = partitionResolved([1, null, 2, null, 3]);
-        expect(items).toEqual([1, 2, 3]);
-    });
-
-    it('reports full coverage when nothing is null', () => {
-        expect(partitionResolved([1, 2, 3]).fullCoverage).toBe(true);
-    });
-
-    it('reports incomplete coverage when even one item is null', () => {
-        expect(partitionResolved([1, null, 3]).fullCoverage).toBe(false);
-    });
-
-    it('treats an empty list as full coverage — there is nothing left unresolved', () => {
-        expect(partitionResolved([]).fullCoverage).toBe(true);
     });
 });
 
@@ -188,7 +168,7 @@ describe('mergeMemory', () => {
     it('unions when a source was never attempted, not merely unresolved', () => {
         // THE critical hole: a competitor dropped before the resolution loop (model
         // nondeterminism, a maxCompetitors cut, a shorter directories list) never shows
-        // up as an unresolved entry, so the old `fullCoverage` gate read "complete" and
+        // up as an unresolved entry, so the old coverage-flag gate read "complete" and
         // replaced memory. Comparing evidence bases sees it.
         const { memory, replaced } = mergeMemory(
             mem(['a', 'b'], ['x.com', 'dropped.com']),
@@ -249,7 +229,7 @@ describe('mergeMemory', () => {
     });
 
     it('end to end: a removal survives one blind run and then genuinely drops out', () => {
-        // The property `mergeMemory`'s doc comment claims, which the old `fullCoverage`
+        // The property `mergeMemory`'s doc comment claims, which the old coverage-flag
         // gate did not actually have: it required ALL 20 competitors to resolve and so
         // essentially never fired, and memory only ever grew.
         let memory = mem(['gone', 'kept'], ['peer.com', 'dir.io']);

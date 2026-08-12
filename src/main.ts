@@ -63,7 +63,6 @@ log.info('Done', {
     new: summary.rows.filter((r) => r.status === 'NEW').length,
     baseline: summary.isBaseline,
     freshSources: summary.freshSources,
-    fullCoverage: summary.fullCoverage,
     memoryReplaced: summary.memoryReplaced,
     chargedEvents: summary.chargedEvents,
     chargingState: summary.chargingState,
