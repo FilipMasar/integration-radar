@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-    computeGaps,
     diffAgainstPrevious,
     inputFingerprint,
     mapLimit,
@@ -39,53 +38,6 @@ describe('normalizeName', () => {
 
     it('drops parenthetical qualifiers', () => {
         expect(normalizeName('Notion (via Zapier)')).toBe('notion');
-    });
-});
-
-describe('computeGaps', () => {
-    const sources = [
-        { name: 'firecrawl.dev', kind: 'peer' as const, names: ['Weaviate', 'Slack', 'API'] },
-        { name: 'zyte.com', kind: 'peer' as const, names: ['Weaviate'] },
-        { name: 'n8n.io', kind: 'directory' as const, names: ['Weaviate', 'Clay'] },
-    ];
-
-    it('reports what sources carry and we do not', () => {
-        expect(computeGaps(['slack'], sources, 1).map((c) => c.slug)).toContain('weaviate');
-    });
-
-    it('excludes what we already have', () => {
-        expect(computeGaps(['weaviate'], sources, 1).map((c) => c.slug)).not.toContain('weaviate');
-    });
-
-    it('counts peers and directories separately', () => {
-        const [top] = computeGaps([], sources, 1);
-        expect(top.slug).toBe('weaviate');
-        expect(top.peerCount).toBe(2);
-        expect(top.directoryCount).toBe(1);
-        expect(top.carriedBy).toEqual(['firecrawl.dev', 'zyte.com', 'n8n.io']);
-    });
-
-    it('drops generic stopwords that are not real integrations', () => {
-        expect(computeGaps([], sources, 1).map((c) => c.slug)).not.toContain('api');
-    });
-
-    it('applies the minimum source threshold', () => {
-        expect(computeGaps([], sources, 3).map((c) => c.slug)).toEqual(['weaviate']);
-    });
-
-    it('sorts by peer count first, then total sources', () => {
-        const s = [
-            { name: 'a.com', kind: 'peer' as const, names: ['rare'] },
-            { name: 'b.com', kind: 'peer' as const, names: ['rare', 'common'] },
-            { name: 'd1.io', kind: 'directory' as const, names: ['common'] },
-            { name: 'd2.io', kind: 'directory' as const, names: ['common'] },
-        ];
-        expect(computeGaps([], s, 1).map((c) => c.slug)).toEqual(['rare', 'common']);
-    });
-
-    it('normalizes both sides before comparing', () => {
-        const s = [{ name: 'x.com', kind: 'peer' as const, names: ['AWS S3'] }];
-        expect(computeGaps(['Amazon S3'], s, 1)).toEqual([]);
     });
 });
 
@@ -148,22 +100,17 @@ describe('sourceName', () => {
     });
 });
 
-describe('rankCandidates / computeGaps', () => {
+describe('rankCandidates', () => {
     const sources = [
         { name: 'a.com', kind: 'peer' as const, names: ['two-source', 'one-source'] },
         { name: 'b.com', kind: 'peer' as const, names: ['two-source'] },
     ];
 
-    it('rankCandidates keeps candidates below any threshold — it is the memory pool', () => {
+    it('keeps candidates below any threshold — it is the memory pool', () => {
         // The bug: applying `minSources` before memory is computed. A user who raises
         // minSources to 3 and back to 2 (the README recommends the tuning) would then
         // get every 2-source candidate back as fabricated NEW.
         expect(rankCandidates([], sources).map((c) => c.slug)).toEqual(['two-source', 'one-source']);
-    });
-
-    it('computeGaps applies the threshold on top of the same ranking', () => {
-        expect(computeGaps([], sources, 2).map((c) => c.slug)).toEqual(['two-source']);
-        expect(computeGaps([], sources, 1).map((c) => c.slug)).toEqual(rankCandidates([], sources).map((c) => c.slug));
     });
 });
 

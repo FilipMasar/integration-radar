@@ -185,8 +185,10 @@ export function sourceName(raw: string): string {
  * The full ranked candidate pool: everything any source carries that `mine` lacks,
  * ranked by how many *competitors* carry it, then by total sources.
  *
- * Split out from `computeGaps` because memory must be computed from the unfiltered pool
- * (see `Memory.slugs`) while the display list is computed from the filtered one.
+ * Memory is computed from this unfiltered pool (see `Memory.slugs`); the display list is
+ * the `minSources`-filtered slice of it, which `runIntegrationRadar` derives inline. Those
+ * are deliberately two different things — filtering before memory turns a knob-twiddle
+ * into a wave of fabricated NEW.
  */
 export function rankCandidates(mine: string[], sources: SourceList[]): RawCandidate[] {
     const owned = new Set(mine.map(normalizeName));
@@ -221,19 +223,6 @@ export function rankCandidates(mine: string[], sources: SourceList[]): RawCandid
                 b.directoryCount - a.directoryCount ||
                 a.slug.localeCompare(b.slug),
         );
-}
-
-/**
- * The display list: the ranked pool, restricted to candidates at least `minSources`
- * sources carry. A pure presentation filter — it must never be applied before memory
- * is computed.
- */
-export function computeGaps(
-    mine: string[],
-    sources: SourceList[],
-    minSources: number,
-): RawCandidate[] {
-    return rankCandidates(mine, sources).filter((c) => c.peerCount + c.directoryCount >= minSources);
 }
 
 /**
