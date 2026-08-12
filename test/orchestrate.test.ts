@@ -235,7 +235,7 @@ describe('runIntegrationRadar — critical fix: the display cap must not truncat
     it('carries every ranked candidate into memory even when maxRows truncates what is displayed', async () => {
         const rivalHit = hit('https://rival.com/integrations');
         // Five distinct candidates, all carried by the same single source, so all tie at
-        // peerCount 1 / directoryCount 0 and computeGaps sorts them alphabetically by slug.
+        // peerCount 1 / directoryCount 0 and rankCandidates sorts them alphabetically by slug.
         const fiveNames = ['Candidate Alpha', 'Candidate Bravo', 'Candidate Charlie', 'Candidate Delta', 'Candidate Echo'];
 
         const savePreviousSpy = vi.fn(async (_domain: string, _memory: StoredMemory) => undefined);
@@ -266,7 +266,7 @@ describe('runIntegrationRadar — critical fix: the display cap must not truncat
         expect(pushDataSpy.mock.calls[0][0]).toHaveLength(2);
 
         // Memory must NOT be capped — this is the Critical finding from fix round 1's
-        // review: `computeGaps(...).slice(0, MAX_ROWS)` running before the slugs used
+        // review: `rankCandidates(...).slice(0, MAX_ROWS)` running before the slugs used
         // for `savePrevious` are computed reproduces the exact "unresolved reads as
         // removed" bug requirement 2 exists to prevent, just triggered by rank jitter
         // around the cutoff instead of a source failing to resolve. If `.slice` ever

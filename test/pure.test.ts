@@ -112,6 +112,30 @@ describe('rankCandidates', () => {
         // get every 2-source candidate back as fabricated NEW.
         expect(rankCandidates([], sources).map((c) => c.slug)).toEqual(['two-source', 'one-source']);
     });
+
+    it('excludes generic stopwords that are not real integrations', () => {
+        const s = [
+            { name: 'firecrawl.dev', kind: 'peer' as const, names: ['Weaviate', 'Slack', 'API'] },
+            { name: 'zyte.com', kind: 'peer' as const, names: ['Weaviate'] },
+            { name: 'n8n.io', kind: 'directory' as const, names: ['Weaviate', 'Clay'] },
+        ];
+        expect(rankCandidates([], s).map((c) => c.slug)).not.toContain('api');
+    });
+
+    it('excludes candidates with cross-alias ownership normalization', () => {
+        const s = [{ name: 'x.com', kind: 'peer' as const, names: ['AWS S3'] }];
+        expect(rankCandidates(['Amazon S3'], s).map((c) => c.slug)).not.toContain('aws-s3');
+    });
+
+    it('sorts by peer count first, then directory count as tie-breaker', () => {
+        const s = [
+            { name: 'a.com', kind: 'peer' as const, names: ['rare'] },
+            { name: 'b.com', kind: 'peer' as const, names: ['rare', 'common'] },
+            { name: 'd1.io', kind: 'directory' as const, names: ['common'] },
+            { name: 'd2.io', kind: 'directory' as const, names: ['common'] },
+        ];
+        expect(rankCandidates([], s).map((c) => c.slug)).toEqual(['rare', 'common']);
+    });
 });
 
 describe('inputFingerprint', () => {
