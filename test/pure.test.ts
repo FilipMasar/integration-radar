@@ -4,6 +4,7 @@ import {
     inputFingerprint,
     mapLimit,
     mergeMemory,
+    normalizeCompetitors,
     normalizeName,
     rankCandidates,
     sourceName,
@@ -77,6 +78,35 @@ describe('sourceName', () => {
 
     it('drops scheme, port, query and fragment', () => {
         expect(sourceName('HTTPS://Example.com:8443/a/b?c=d#e')).toBe('example.com');
+    });
+});
+
+describe('normalizeCompetitors', () => {
+    it('normalizes a domain carrying a scheme, path and www', () => {
+        expect(normalizeCompetitors([{ name: 'Jina AI', domain: 'https://www.jina.ai/pricing' }])).toEqual([
+            { name: 'Jina AI', domain: 'jina.ai' },
+        ]);
+    });
+
+    it('drops an entry with an empty domain rather than deriving one from the name', () => {
+        expect(normalizeCompetitors([{ name: 'Import.io', domain: '' }])).toEqual([]);
+    });
+
+    it('drops an entry whose domain is not a domain', () => {
+        expect(normalizeCompetitors([{ name: 'Bad', domain: 'not a domain' }])).toEqual([]);
+    });
+
+    it('deduplicates entries that share a domain, keeping the first', () => {
+        expect(
+            normalizeCompetitors([
+                { name: 'Make', domain: 'make.com' },
+                { name: 'Make.com', domain: 'https://make.com/en' },
+            ]),
+        ).toEqual([{ name: 'Make', domain: 'make.com' }]);
+    });
+
+    it('trims the name', () => {
+        expect(normalizeCompetitors([{ name: '  Rival  ', domain: 'rival.com' }])[0].name).toBe('Rival');
     });
 });
 

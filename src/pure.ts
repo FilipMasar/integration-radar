@@ -181,6 +181,32 @@ export function sourceName(raw: string): string {
     return host.replace(/^www\./, '');
 }
 
+/** A plausible bare domain. Deliberately not a full RFC check — it only has to reject
+ * prose, empty strings and names that were never domains. */
+export const DOMAIN_RE = /^[a-z0-9.-]+\.[a-z]{2,}$/;
+
+/**
+ * Clean a model-supplied or user-supplied competitor list into usable records.
+ *
+ * Domains go through `sourceName`, so a scheme, path, port or `www.` prefix all collapse
+ * to the one spelling the rest of the pipeline tracks a source under. Anything that is
+ * still not a plausible domain is **dropped, never derived**: a derived domain costs a
+ * real fetch and can land on a parked page that returns HTTP 200 — `importio.com` is
+ * exactly this. Deduped by domain, first entry winning.
+ */
+export function normalizeCompetitors(raw: { name: string; domain: string }[]): Company[] {
+    const cleaned = raw
+        .map((c) => ({ name: c.name.trim(), domain: sourceName(c.domain) }))
+        .filter((c) => DOMAIN_RE.test(c.domain));
+    // Map.set on a repeated key keeps the *last* write, so building the map straight from
+    // `cleaned` would silently keep the last duplicate, not the first. Guard the set instead.
+    const byDomain = new Map<string, Company>();
+    for (const c of cleaned) {
+        if (!byDomain.has(c.domain)) byDomain.set(c.domain, c);
+    }
+    return [...byDomain.values()];
+}
+
 /**
  * The full ranked candidate pool: everything any source carries that `mine` lacks,
  * ranked by how many *competitors* carry it, then by total sources.
