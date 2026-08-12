@@ -174,6 +174,25 @@ describe('inputFingerprint', () => {
         const strict = { ...base, minSources: 9 };
         expect(inputFingerprint(loose)).toBe(inputFingerprint(strict));
     });
+
+    it('changes when competitors are supplied', () => {
+        const base = { companyDomain: 'mine.com', maxCompetitors: 20, directories: ['https://d.io'] };
+        expect(inputFingerprint({ ...base, competitors: ['rival.com'] })).not.toBe(inputFingerprint(base));
+    });
+
+    it('does not change when the same competitors are reordered or duplicated', () => {
+        const base = { companyDomain: 'mine.com', maxCompetitors: 20, directories: ['https://d.io'] };
+        expect(inputFingerprint({ ...base, competitors: ['a.com', 'b.com'] })).toBe(
+            inputFingerprint({ ...base, competitors: ['b.com', 'a.com', 'a.com'] }),
+        );
+    });
+
+    it('normalizes competitor spellings, so www and casing are not a different question', () => {
+        const base = { companyDomain: 'mine.com', maxCompetitors: 20, directories: ['https://d.io'] };
+        expect(inputFingerprint({ ...base, competitors: ['https://www.A.com/x'] })).toBe(
+            inputFingerprint({ ...base, competitors: ['a.com'] }),
+        );
+    });
 });
 
 describe('mergeMemory', () => {

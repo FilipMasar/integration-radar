@@ -28,6 +28,9 @@ export interface Input {
     maxCompetitors: number;
     directories: string[];
     minSources: number;
+    /** Optional explicit competitor domains. When non-empty, discovery is skipped
+     * entirely — no seed read, no LLM call. Joins the fingerprint. */
+    competitors?: string[];
 }
 
 /** A finished output row, `Candidate` plus the search-tier weak-evidence flag. */

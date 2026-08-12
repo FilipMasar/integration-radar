@@ -267,12 +267,18 @@ export function inputFingerprint(input: {
     companyDomain: string;
     maxCompetitors: number;
     directories: string[];
+    competitors?: string[];
 }): string {
     return JSON.stringify({
         companyDomain: sourceName(input.companyDomain),
         maxCompetitors: input.maxCompetitors,
         // Sorted and deduped: reordering the same list is not a different question.
         directories: [...new Set(input.directories.map((u) => u.trim().toLowerCase().replace(/\/+$/, '')))].sort(),
+        // Same treatment, normalized through `sourceName` so `www.a.com` and `a.com` are
+        // one entry. An explicit competitor list defines what the run looks at just as
+        // much as `directories` does, so changing it must declare a baseline rather than
+        // report the change in the question as change in the world.
+        competitors: [...new Set((input.competitors ?? []).map(sourceName))].sort(),
     });
 }
 

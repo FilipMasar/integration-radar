@@ -21,6 +21,14 @@
             "minimum": 1,
             "maximum": 30
         },
+        "competitors": {
+            "title": "Competitors",
+            "type": "array",
+            "description": "Optional. Explicit competitor domains, as bare domains such as \"rival.com\". When set, these are used instead of asking the model to name competitors. Changing this list makes the next run a fresh baseline rather than a NEW/SEEN diff, because it changes what the run looks at.",
+            "editor": "stringList",
+            "default": [],
+            "prefill": []
+        },
         "directories": {
             "title": "Integration directories",
             "type": "array",
