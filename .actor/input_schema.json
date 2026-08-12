@@ -7,7 +7,7 @@
         "companyDomain": {
             "title": "Company domain",
             "type": "string",
-            "description": "The company to analyze, as a bare domain. Its competitors are read from its own alternatives page.",
+            "description": "The company to analyze, as a bare domain. Its competitors are identified automatically from the model's knowledge of the market, or supplied via the \"competitors\" input.",
             "editor": "textfield",
             "prefill": "apify.com",
             "pattern": "^[a-z0-9.-]+\\.[a-z]{2,}$"
@@ -15,7 +15,7 @@
         "maxCompetitors": {
             "title": "Maximum competitors",
             "type": "integer",
-            "description": "How many competitors to read. When an alternatives page names more than this, the set is cut in a fixed alphabetical order so the same page always yields the same competitors — a low number therefore drops real competitors arbitrarily. 20 is a sensible floor. Changing this makes the next run a fresh baseline rather than a NEW/SEEN diff.",
+            "description": "How many competitors to read. The competitor set is named most-direct-first, so a lower number keeps the closest competitors and drops the rest. Changing this makes the next run a fresh baseline rather than a NEW/SEEN diff.",
             "editor": "number",
             "default": 20,
             "minimum": 1,
