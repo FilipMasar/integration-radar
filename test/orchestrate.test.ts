@@ -85,7 +85,10 @@ function baseDeps(overrides: Partial<Deps> = {}): Deps {
         loadPrevious: vi.fn(async () => null),
         savePrevious: vi.fn(async () => undefined),
         pushData: vi.fn(async () => undefined),
-        charge: vi.fn(async () => undefined),
+        charge: vi.fn(async (event: { eventName: string; count: number }) => ({
+            chargedCount: event.count,
+            eventChargeLimitReached: false,
+        })),
     };
     return { ...base, ...overrides };
 }
@@ -398,6 +401,129 @@ describe('runIntegrationRadar — memory describes the conditions it was gathere
         expect(summary.memoryReplaced).toBe(true);
         const [, saved] = savePreviousSpy.mock.calls[0];
         expect(saved.slugs).not.toContain('really-gone'); // the removal property, actually true
+    });
+});
+
+describe('runIntegrationRadar — charging', () => {
+    /** Records the order of the side effects that spend the user's money. */
+    function orderedDeps(overrides: Partial<Deps> = {}): { deps: Deps; calls: string[] } {
+        const calls: string[] = [];
+        const deps = baseDeps({
+            pushData: vi.fn(async () => {
+                calls.push('pushData');
+            }),
+            savePrevious: vi.fn(async () => {
+                calls.push('savePrevious');
+            }),
+            charge: vi.fn(async (event: { eventName: string; count: number }) => {
+                calls.push(`charge:${event.eventName}:${event.count}`);
+                return { chargedCount: event.count, eventChargeLimitReached: false };
+            }),
+            ...overrides,
+        });
+        return { deps, calls };
+    }
+
+    it('charges only after the dataset has been pushed', async () => {
+        // A charge before the push means a migration between the two leaves the user
+        // paying for a run that produced nothing.
+        const { deps, calls } = orderedDeps();
+        await runIntegrationRadar(BASE_INPUT, deps);
+
+        expect(calls[0]).toBe('pushData');
+        expect(calls.filter((c) => c.startsWith('charge:'))).toHaveLength(2);
+        expect(calls.indexOf('pushData')).toBeLessThan(calls.findIndex((c) => c.startsWith('charge:')));
+    });
+
+    it('charges the two advertised event names, with the counts they advertise', async () => {
+        // Pins the strings against `.actor/pay_per_event.json`, which nothing else reads:
+        // a typo in either eventName is otherwise invisible to build, test and lint.
+        // Cold run: the alternatives page, the own integrations page and one competitor
+        // are all fetched fresh; the placeholder directory does not resolve.
+        const { deps, calls } = orderedDeps();
+        const summary = await runIntegrationRadar(BASE_INPUT, deps);
+
+        expect(summary.freshSources).toBe(3);
+        expect(calls).toContain('charge:source-analyzed:3');
+        expect(calls).toContain(`charge:candidate-found:${summary.rows.length}`);
+        expect(summary.chargedEvents).toBe(3 + summary.rows.length);
+    });
+
+    it('never charges source-analyzed for a page served from cache', async () => {
+        // The guard is `if (!resolved.fromCache)`. Deleting it bills the user again for
+        // every page on every warm run — the README promises the opposite.
+        const { deps, calls } = orderedDeps({
+            findList: vi.fn(async (domain: string, kind: ListKind): Promise<Resolved> => {
+                if (domain === 'mine.com' && kind === 'alternatives') {
+                    return resolved({ hit: hit('https://mine.com/alternatives'), key: 'alt', fromCache: true });
+                }
+                if (domain === 'mine.com' && kind === 'integrations') {
+                    return resolved({ hit: hit('https://mine.com/integrations'), key: 'own', fromCache: true });
+                }
+                if (domain === 'rival.com') {
+                    return resolved({ hit: hit('https://rival.com/integrations'), key: 'rival', fromCache: true });
+                }
+                return resolved({ hit: null, key: `${domain}-${kind}` });
+            }),
+        });
+
+        const summary = await runIntegrationRadar(BASE_INPUT, deps);
+
+        expect(summary.freshSources).toBe(0);
+        expect(calls.some((c) => c.startsWith('charge:source-analyzed'))).toBe(false);
+        expect(calls).toContain(`charge:candidate-found:${summary.rows.length}`);
+    });
+
+    it('never charges a miss that came back from the miss cache', async () => {
+        // `fromCache: true, hit: null` — a known miss. It resolved nothing, so there is
+        // nothing to charge for, and the `hit` check must run before the cache check.
+        const { deps, calls } = orderedDeps({
+            fetchUrl: vi.fn(async (): Promise<Resolved> => resolved({ hit: null, fromCache: true, key: 'dir' })),
+        });
+
+        const summary = await runIntegrationRadar(BASE_INPUT, deps);
+        expect(summary.freshSources).toBe(3); // alt + own + rival, not the missed directory
+        expect(calls).toContain('charge:source-analyzed:3');
+    });
+
+    it('reports an under-charge instead of swallowing it', async () => {
+        // Apify caps a batched charge at the user's ACTOR_MAX_TOTAL_CHARGE_USD and
+        // returns the truth in `chargedCount`. Discarding the ChargeResult — the old
+        // `.then(() => undefined)` — makes a budget-capped run silently under-bill.
+        const deps = baseDeps({
+            charge: vi.fn(async () => ({ chargedCount: 1, eventChargeLimitReached: true })),
+        });
+
+        const summary = await runIntegrationRadar(BASE_INPUT, deps);
+
+        expect(summary.chargeLimitReached).toBe(true);
+        expect(summary.chargedEvents).toBe(2); // one per capped call, not the counts requested
+    });
+
+    it('does not call charge at all when there is nothing to charge for', async () => {
+        // Every source cached and no candidates found: a zero-count charge is still a
+        // billing API call and must not be made.
+        const deps = baseDeps({
+            findList: vi.fn(async (domain: string, kind: ListKind): Promise<Resolved> => {
+                if (domain === 'mine.com' && kind === 'alternatives') {
+                    return resolved({ hit: hit('https://mine.com/alternatives'), key: 'alt', fromCache: true });
+                }
+                if (domain === 'mine.com' && kind === 'integrations') {
+                    return resolved({ hit: hit('https://mine.com/integrations'), key: 'own', fromCache: true });
+                }
+                if (domain === 'rival.com') {
+                    return resolved({ hit: hit('https://rival.com/integrations'), key: 'rival', fromCache: true });
+                }
+                return resolved({ hit: null, key: `${domain}-${kind}` });
+            }),
+            // The competitor lists exactly what the company already has -> no candidates.
+            extractNames: vi.fn(async (): Promise<string[]> => ['Existing Thing']),
+        });
+
+        const summary = await runIntegrationRadar(BASE_INPUT, deps);
+
+        expect(summary.rows).toHaveLength(0);
+        expect(deps.charge).not.toHaveBeenCalled();
     });
 });
 

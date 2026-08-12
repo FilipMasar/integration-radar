@@ -55,6 +55,20 @@ export interface RunSummary {
     totalRanked: number;
     /** True when memory superseded the stored one rather than being unioned into it. */
     memoryReplaced: boolean;
+    /** Events actually billed, which can be fewer than requested — see `chargeFor`. */
+    chargedEvents: number;
+    /** True when the platform refused part of a charge because the run hit a budget cap. */
+    chargeLimitReached: boolean;
+}
+
+/**
+ * The parts of the Apify SDK's `ChargeResult` this pipeline acts on. Typed structurally
+ * rather than imported so `orchestrate.ts` stays free of `apify` runtime imports (see the
+ * `Deps` doc comment); `main.ts`'s wiring is what pins it to the real thing.
+ */
+export interface ChargeOutcome {
+    chargedCount: number;
+    eventChargeLimitReached: boolean;
 }
 
 /**
@@ -67,8 +81,8 @@ export interface RunSummary {
  * { runIntegrationRadar } from '../src/orchestrate.js'`, build a fake `Deps`, and call
  * it directly — no module mocking, no live Actor environment required.
  *
- * Pure helpers (`mapLimit`, `computeGaps`, `diffAgainstPrevious`, `mergePreviousSlugs`,
- * `partitionResolved`) are NOT part of `Deps` — they're already directly testable and
+ * Pure helpers (`mapLimit`, `rankCandidates`, `diffAgainstPrevious`, `mergeMemory`,
+ * `inputFingerprint`, `partitionResolved`) are NOT part of `Deps` — they're already directly testable and
  * already tested in `pure.test.ts`, so injecting them here would just be indirection.
  */
 export interface Deps {
@@ -87,7 +101,12 @@ export interface Deps {
     loadPrevious: typeof loadPrevious;
     savePrevious: typeof savePrevious;
     pushData: (rows: OutputRow[]) => Promise<void>;
-    charge: (event: { eventName: string; count: number }) => Promise<void>;
+    /**
+     * Returns the platform's answer, not `void`. A batched charge can be honoured only
+     * in part once the user's `ACTOR_MAX_TOTAL_CHARGE_USD` is reached, and discarding
+     * the result makes that silent — the run keeps every row and bills for fewer.
+     */
+    charge: (event: { eventName: string; count: number }) => Promise<ChargeOutcome>;
     /** Display cap, overridable only so tests can exercise the boundary without
      * generating 100+ fake candidates. Production always uses the default. */
     maxRows?: number;
@@ -121,6 +140,29 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     const fingerprint = inputFingerprint({ companyDomain, maxCompetitors, directories });
 
     log.info('Starting', { companyDomain, maxCompetitors, minSources, directories: directories.length });
+
+    /**
+     * Apply one accumulated charge and report what the platform actually billed.
+     *
+     * Apify's docs are explicit that with the `count` parameter `chargedCount` may come
+     * back lower than requested once the user's max-total-charge limit is reached, and
+     * that a caller using `count` must check it. There is nothing to undo at this point
+     * — the rows are already pushed, deliberately, so a user can never pay for a run
+     * that produced nothing — so the honest response is to say so loudly rather than
+     * let an under-charge pass silently.
+     */
+    async function chargeFor(eventName: string, count: number): Promise<ChargeOutcome | null> {
+        if (count <= 0) return null;
+        const result = await deps.charge({ eventName, count });
+        if (result.chargedCount < count) {
+            log.warning('Charged fewer events than requested — the run hit a max-charge limit', {
+                eventName,
+                requested: count,
+                charged: result.chargedCount,
+            });
+        }
+        return result;
+    }
 
     /**
      * Extract the names from a resolved page, reusing an earlier extraction when the page
@@ -179,6 +221,12 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
                 'do not publish one; there is nothing to compare against.',
         );
     }
+    // This page costs a child-Actor fetch plus a full LLM extraction exactly like every
+    // other source, so it is charged like every other source. It used not to be, while
+    // the company's own integrations page was — two mismatches with the advertised
+    // event, in opposite directions.
+    if (!alt.fromCache) freshSources += 1;
+
     // Cached against the alternatives page record, like every other extraction. Without
     // this an LLM re-derived the competitor set from a marketing page on every run, so
     // the source set the entire diff rests on was re-rolled each time — see
@@ -360,8 +408,18 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     });
     await deps.savePrevious(companyDomain, { ...memory, fingerprint }, runDate);
 
-    if (freshSources > 0) await deps.charge({ eventName: 'source-analyzed', count: freshSources });
-    if (rows.length > 0) await deps.charge({ eventName: 'candidate-found', count: rows.length });
+    const sourceCharge = await chargeFor('source-analyzed', freshSources);
+    const candidateCharge = await chargeFor('candidate-found', rows.length);
 
-    return { rows, freshSources, fullCoverage, isBaseline, totalRanked: fullGaps.length, memoryReplaced };
+    return {
+        rows,
+        freshSources,
+        fullCoverage,
+        isBaseline,
+        totalRanked: fullGaps.length,
+        memoryReplaced,
+        chargedEvents: (sourceCharge?.chargedCount ?? 0) + (candidateCharge?.chargedCount ?? 0),
+        chargeLimitReached:
+            (sourceCharge?.eventChargeLimitReached ?? false) || (candidateCharge?.eventChargeLimitReached ?? false),
+    };
 }

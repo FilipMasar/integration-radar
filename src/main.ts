@@ -51,7 +51,10 @@ const summary = await runIntegrationRadar(input, {
     loadPrevious,
     savePrevious,
     pushData: async (rows) => Actor.pushData(rows),
-    charge: async (event) => Actor.charge(event).then(() => undefined),
+    // Passed through, not swallowed. `Actor.charge` returns a `ChargeResult` whose
+    // `chargedCount` can be lower than the requested `count` once the user's
+    // max-total-charge limit is reached; `runIntegrationRadar` checks it and warns.
+    charge: async (event) => Actor.charge(event),
 });
 
 log.info('Done', {
@@ -62,6 +65,8 @@ log.info('Done', {
     freshSources: summary.freshSources,
     fullCoverage: summary.fullCoverage,
     memoryReplaced: summary.memoryReplaced,
+    chargedEvents: summary.chargedEvents,
+    chargeLimitReached: summary.chargeLimitReached,
 });
 
 await Actor.exit();

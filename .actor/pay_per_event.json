@@ -1,7 +1,7 @@
 {
     "source-analyzed": {
         "eventTitle": "Source analyzed",
-        "eventDescription": "One competitor or directory page was fetched fresh and its list extracted.",
+        "eventDescription": "One source page was fetched fresh this run and its list extracted: the company's own alternatives or integrations page, a competitor's integrations page, or a directory. Pages served from cache are not charged.",
         "eventPriceUsd": 0.02
     },
     "candidate-found": {
