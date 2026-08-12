@@ -124,7 +124,7 @@ describe('rankCandidates', () => {
 
     it('excludes candidates with cross-alias ownership normalization', () => {
         const s = [{ name: 'x.com', kind: 'peer' as const, names: ['AWS S3'] }];
-        expect(rankCandidates(['Amazon S3'], s).map((c) => c.slug)).not.toContain('aws-s3');
+        expect(rankCandidates(['Amazon S3'], s)).toEqual([]);
     });
 
     it('sorts by peer count first, then directory count as tie-breaker', () => {
