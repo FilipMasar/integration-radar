@@ -140,6 +140,17 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     // than a bare read, because `undefined` here silently turns comparisons into `false`
     // and produces a confident, empty "no gaps found" report.
     const maxCompetitors = input.maxCompetitors ?? 20;
+    // Same reason as the default above — the schema's `type: integer, minimum: 1` binds the
+    // Console form, not an API caller, and `0 ?? 20` is `0`. Rejected here rather than at
+    // the cut in step 1, because by the time a bad value reaches `.slice` every fatal check
+    // has already passed on a perfectly good competitor set: `slice(0, 0)` (or `slice(0,
+    // NaN)`, which is why this tests for an integer and not just for `>= 1`) then empties
+    // it, and the run goes on to read and *charge for* the company's own page and every
+    // directory before producing the confident, empty report this whole block exists to
+    // prevent. Naming the input is also the only way the error can name the actual cause.
+    if (!Number.isInteger(maxCompetitors) || maxCompetitors < 1) {
+        throw new Error(`"maxCompetitors" must be an integer of at least 1, got ${maxCompetitors}.`);
+    }
     const minSources = input.minSources ?? 2;
     const directories = input.directories?.length ? input.directories : DEFAULT_DIRECTORIES;
     // Read here rather than in step 1, because the fingerprint below needs it: an

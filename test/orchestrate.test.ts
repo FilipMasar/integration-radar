@@ -752,7 +752,6 @@ describe('runIntegrationRadar — one namespace for peer and directory sources',
         // with 'path', silently clearing the flag.
         expect(summary.rows.find((r) => r.slug === 'weakly-sourced')?.weakEvidence).toBe(true);
     });
-
 });
 
 describe('runIntegrationRadar — the directory pass', () => {
@@ -985,6 +984,30 @@ describe('runIntegrationRadar — step 1: the competitor seed', () => {
         // Bounded cost, but never silently: a run that quietly ignored a third of the
         // competitor set would report gaps as if it had read all of it.
         expect(log.warning).toHaveBeenCalledWith('Competitor list truncated', { found: 3, maxCompetitors: 2 });
+    });
+
+    it('refuses a maxCompetitors below 1 instead of capping the set to nothing', async () => {
+        // `minimum: 1` in the input schema binds the Console form, not an API caller, and
+        // `0 ?? 20` is `0`, so the default does not rescue it either. Left to reach the cut,
+        // `slice(0, 0)` empties a perfectly good competitor set *after* the fatal checks
+        // have passed — the run then reads and charges for the company's own page and every
+        // directory before producing a directory-only report or dying somewhere unrelated.
+        const deps = baseDeps();
+
+        await expect(runIntegrationRadar({ ...BASE_INPUT, maxCompetitors: 0 }, deps)).rejects.toThrow(
+            '"maxCompetitors" must be an integer of at least 1, got 0.',
+        );
+        // Fatal before anything is fetched, so nothing is billed for a run that cannot work.
+        expect(deps.findIntegrations).not.toHaveBeenCalled();
+        expect(deps.charge).not.toHaveBeenCalled();
+    });
+
+    it('refuses a maxCompetitors that is not a whole number', async () => {
+        // A bare `< 1` test would let `NaN` through — every comparison against it is false —
+        // and `slice(0, NaN)` empties the set exactly like `slice(0, 0)` does.
+        await expect(
+            runIntegrationRadar({ ...BASE_INPUT, maxCompetitors: Number.NaN }, baseDeps()),
+        ).rejects.toThrow('"maxCompetitors" must be an integer of at least 1');
     });
 
     it('keeps the model ordering when it cuts, rather than the alphabetical one', async () => {

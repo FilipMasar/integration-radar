@@ -15,10 +15,11 @@ import type { PageHit, RawCandidate } from '../src/pure.js';
  *
  * This only fakes the network boundary (the OpenAI SDK). Everything downstream of the
  * mocked response — stripFences, JSON.parse, zod validation, the retry loop, the
- * domain-cleaning/dedup logic in seedCompetitors, the fail-open behaviour of
- * isListPage, the prompt-building in isListPage/describeCandidates — is the real code
- * in src/llm.ts, unmocked. `apify`'s `log` is stubbed only because these tests run
- * without `Actor.init()`.
+ * fail-open behaviour of isListPage, the prompt-building in isListPage/describeCandidates
+ * — is the real code in src/llm.ts, unmocked. The domain cleaning and dedup that
+ * `seedCompetitors` applies to the parsed response is `normalizeCompetitors` in
+ * `src/pure.ts`, and is tested directly in `test/pure.test.ts`. `apify`'s `log` is
+ * stubbed only because these tests run without `Actor.init()`.
  */
 const mockCreate = vi.hoisted(() => vi.fn());
 
@@ -89,9 +90,10 @@ describe('seedCompetitors', () => {
     });
 
     // The three below exercise `completeJson`, which every LLM call in this file shares.
-    // They lived on `extractCompetitors` until it was deleted with the alternatives page;
-    // nothing else covers the parse-failure retry branch (distinct from the thrown-error
-    // one) or the request parameters, so they moved here rather than going away.
+    // They were written against the alternatives-page competitor extraction, which no
+    // longer exists; nothing else covers the parse-failure retry branch (distinct from the
+    // thrown-error one) or the request parameters, so they moved here rather than going
+    // away with it.
     it('retries once on an unparseable response and returns the second attempt', async () => {
         mockCreate.mockResolvedValueOnce(json('not json at all'));
         mockCreate.mockResolvedValueOnce(json(JSON.stringify({ competitors: [{ name: 'Weaviate', domain: 'weaviate.io' }] })));
