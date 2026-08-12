@@ -16,10 +16,21 @@ let storePromise: Promise<KeyValueStore> | null = null;
  * open call instead of each issuing its own `Actor.openKeyValueStore` — almost
  * certainly harmless either way (the platform resolves same-named stores to the same
  * underlying store), but this avoids the redundant calls outright.
+ *
+ * A failed open must not poison every later call for the life of the process: the
+ * `.catch` clears `storePromise` before rethrowing, so the next `getStore()` call
+ * retries with a fresh `Actor.openKeyValueStore` instead of re-awaiting (and
+ * re-throwing) the same stale rejection forever — the property the old plain-`let`
+ * version had implicitly, since `store` stayed `null` on error.
  */
 export async function getStore(): Promise<KeyValueStore> {
     if (store) return store;
-    if (!storePromise) storePromise = Actor.openKeyValueStore('integration-radar');
+    if (!storePromise) {
+        storePromise = Actor.openKeyValueStore('integration-radar').catch((err: unknown) => {
+            storePromise = null;
+            throw err;
+        });
+    }
     store = await storePromise;
     return store;
 }
@@ -111,6 +122,15 @@ export async function writeNames(key: string, names: string[]): Promise<void> {
 
 interface MissRecord {
     missedAt: string;
+    /**
+     * Free-form and optional, purely for observability today ('thin' | 'no-match').
+     * The caller never branches on it — a miss is a miss regardless of reason. Kept
+     * as an open string rather than a fixed union so a future fetch layer that can
+     * see the actual HTTP status (a 404 vs. a 200 with no body are different facts,
+     * both currently invisible to us behind rag-web-browser) can start recording
+     * something more specific without a shape migration.
+     */
+    reason?: string;
 }
 
 function missKey(key: string): string {
@@ -119,13 +139,15 @@ function missKey(key: string): string {
 
 /**
  * A known-miss marker for a resolution that came up empty (no page at that URL, or
- * no path/search result that looked right). Stored under a *separate* key from the
- * page record, never as a falsy value inside it — an earlier draft cached `[]` for a
- * failed search, and `[]` is truthy in JS, so it read back as a cache *hit* and
- * permanently disabled the search tier for that domain. A dedicated marker key with
- * its own short TTL can only ever mean "known miss, still fresh," and expires on its
- * own schedule so a page published after the miss is picked up again on some later
- * run rather than staying dark forever.
+ * no path/search result that looked right) — and *only* that. A thrown attempt is not
+ * evidence of absence and must never reach here; see the call sites in `web.ts` for
+ * the completed-vs-threw distinction that guards this. Stored under a *separate* key
+ * from the page record, never as a falsy value inside it — an earlier draft cached
+ * `[]` for a failed search, and `[]` is truthy in JS, so it read back as a cache *hit*
+ * and permanently disabled the search tier for that domain. A dedicated marker key
+ * with its own short TTL can only ever mean "known miss, still fresh," and expires on
+ * its own schedule so a page published after the miss is picked up again on some
+ * later run rather than staying dark forever.
  */
 export async function readMiss(key: string): Promise<boolean> {
     const kv = await getStore();
@@ -135,13 +157,13 @@ export async function readMiss(key: string): Promise<boolean> {
     if (isExpired(record.missedAt, ttlHours(process.env.MISS_TTL_HOURS, DEFAULT_MISS_TTL_HOURS))) {
         return false;
     }
-    log.info('Known miss', { key });
+    log.info('Known miss', { key, reason: record.reason });
     return true;
 }
 
-export async function writeMiss(key: string): Promise<void> {
+export async function writeMiss(key: string, reason?: string): Promise<void> {
     const kv = await getStore();
-    await kv.setValue(missKey(key), { missedAt: new Date().toISOString() } satisfies MissRecord);
+    await kv.setValue(missKey(key), { missedAt: new Date().toISOString(), reason } satisfies MissRecord);
 }
 
 interface PreviousRun {

@@ -82,9 +82,20 @@ export async function fetchUrl(url: string): Promise<Resolved> {
         return { hit: null, fromCache: true, key };
     }
 
+    // A miss may only be recorded once an attempt actually completed and came back
+    // unusable — an exception is an absence of information, not evidence of absence.
+    // Without this flag, a transient failure (bad token, network blip, the child
+    // Actor itself timing out or OOMing) would be indistinguishable from a genuine
+    // "no page here" and would get cached as one for MISS_TTL_HOURS. This project's
+    // own history shows that failure mode is not hypothetical: an entire session
+    // once had every child call fail with "x402 payment header missing" because the
+    // token wasn't loaded, which under the naive version of this code would have
+    // poisoned the cache for every domain touched that session.
+    let completed = false;
     for (const render of [false, true]) {
         try {
             const items = await runRagBrowser(url, render, 1);
+            completed = true;
             const hit = items.length ? toPageHit(items[0], url) : null;
             if (!isThin(hit)) {
                 log.info('Fetched', { url, render, chars: hit!.markdown.length });
@@ -95,10 +106,11 @@ export async function fetchUrl(url: string): Promise<Resolved> {
         } catch (err) {
             // A thrown error here is ambiguous: a bad token and a missing page look
             // identical downstream, so log loudly rather than swallowing silently.
+            // It must NOT set `completed` — see the comment above the loop.
             log.warning('Fetch error', { url, render, error: (err as Error).message });
         }
     }
-    await writeMiss(key);
+    if (completed) await writeMiss(key, 'thin');
     return { hit: null, fromCache: false, key };
 }
 
@@ -144,9 +156,14 @@ export async function findList(domain: string, kind: ListKind): Promise<Resolved
     const cached = await readCache(key);
     if (cached) return { hit: cached, fromCache: true, key };
 
+    // Same rule as fetchUrl: only a search that actually completed and found nothing
+    // usable counts as a miss. A thrown search (auth, network, the child Actor
+    // itself failing) must leave no marker — see fetchUrl's comment for why.
+    let searchCompleted = false;
     try {
         // Two results, not one: the top hit is sometimes an article rather than the list.
         const items = await runRagBrowser(`site:${domain} ${kind}`, false, 2);
+        searchCompleted = true;
         for (const item of items) {
             const hit = toPageHit(item, `https://${domain}`);
             if (looksRight(hit, keyword)) {
@@ -160,6 +177,6 @@ export async function findList(domain: string, kind: ListKind): Promise<Resolved
     }
 
     log.warning('No list found', { domain, kind });
-    await writeMiss(key);
+    if (searchCompleted) await writeMiss(key, 'no-match');
     return { hit: null, fromCache: false, key };
 }
