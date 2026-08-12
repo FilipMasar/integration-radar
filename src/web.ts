@@ -24,6 +24,16 @@ export interface Resolved {
     hit: PageHit | null;
     fromCache: boolean;
     key: string;
+    /**
+     * Which tier produced the hit. Added 2026-08-12; two separate needs converged on it.
+     * (1) Task 5's `isListPage` gate runs on search hits only — path hits are deterministic.
+     * (2) NEW/SEEN: a path guess resolves to the same URL every run, a search does not
+     *     (brightdata.com resolved to two different URLs on two consecutive runs), so a
+     *     `NEW` finding sourced from a search hit is weaker evidence and must be flagged
+     *     rather than reported with the same confidence.
+     * `null` when nothing resolved.
+     */
+    tier: 'path' | 'search' | null;
 }
 
 async function runRagBrowser(query: string, render: boolean, maxResults: number): Promise<RagItem[]> {
@@ -73,45 +83,52 @@ export async function fetchUrl(url: string): Promise<Resolved> {
     const cached = await readCache(key);
     if (cached) {
         log.info('Cache hit', { url });
-        return { hit: cached, fromCache: true, key };
+        return { hit: cached, fromCache: true, key, tier: 'path' };
     }
 
     // Skip straight past a domain that failed both engines recently — this also
     // covers Task 6's fixed directory URLs, not just findList's own callers.
     if (await readMiss(key)) {
-        return { hit: null, fromCache: true, key };
+        return { hit: null, fromCache: true, key, tier: 'path' };
     }
 
-    // A miss may only be recorded once an attempt actually completed and came back
-    // unusable — an exception is an absence of information, not evidence of absence.
-    // Without this flag, a transient failure (bad token, network blip, the child
-    // Actor itself timing out or OOMing) would be indistinguishable from a genuine
-    // "no page here" and would get cached as one for MISS_TTL_HOURS. This project's
-    // own history shows that failure mode is not hypothetical: an entire session
-    // once had every child call fail with "x402 payment header missing" because the
-    // token wasn't loaded, which under the naive version of this code would have
-    // poisoned the cache for every domain touched that session.
-    let completed = false;
+    // A miss may only be recorded once the render attempt — the final, most capable
+    // engine in the loop — has itself completed and come back unusable. Tracking
+    // "at least one attempt completed" is not tight enough: it would let a
+    // completed-but-thin raw-http result justify a miss even when the render retry
+    // itself threw and never got to run, resting the miss on the weaker engine's
+    // result while the stronger, more dispositive one produced no information at
+    // all. Render is also the resource-heavy call (still capped at 4096MB/180s)
+    // far more likely to time out or OOM in practice than the cheap raw-http pass,
+    // so "raw completed thin, render threw" is the operationally relevant ordering,
+    // not an edge case. Resetting this flag at the top of every iteration means
+    // that after the loop it reflects only the *last* (render) attempt's outcome —
+    // an exception on either attempt is an absence of information, not evidence of
+    // absence, and this project has already lived through exactly that failure mode
+    // once (an entire session where every child call failed with "x402 payment
+    // header missing" because the token wasn't loaded).
+    let finalAttemptCompleted = false;
     for (const render of [false, true]) {
+        finalAttemptCompleted = false;
         try {
             const items = await runRagBrowser(url, render, 1);
-            completed = true;
+            finalAttemptCompleted = true;
             const hit = items.length ? toPageHit(items[0], url) : null;
             if (!isThin(hit)) {
                 log.info('Fetched', { url, render, chars: hit!.markdown.length });
                 await writeCache(key, hit!);
-                return { hit, fromCache: false, key };
+                return { hit, fromCache: false, key, tier: 'path' };
             }
             log.info('Thin result', { url, render, chars: hit?.markdown.length ?? 0 });
         } catch (err) {
             // A thrown error here is ambiguous: a bad token and a missing page look
             // identical downstream, so log loudly rather than swallowing silently.
-            // It must NOT set `completed` — see the comment above the loop.
+            // It must NOT leave `finalAttemptCompleted` set — see the comment above.
             log.warning('Fetch error', { url, render, error: (err as Error).message });
         }
     }
-    if (completed) await writeMiss(key, 'thin');
-    return { hit: null, fromCache: false, key };
+    if (finalAttemptCompleted) await writeMiss(key, 'thin');
+    return { hit: null, fromCache: false, key, tier: 'path' };
 }
 
 /** An article about integrations is not a list of them, and it passes the keyword test. */
@@ -144,17 +161,17 @@ export async function findList(domain: string, kind: ListKind): Promise<Resolved
     // neither a guessable page nor a findable one via search costs zero child calls
     // on this run, not just a cheaper miss on the search tier alone.
     if (await readMiss(key)) {
-        return { hit: null, fromCache: true, key };
+        return { hit: null, fromCache: true, key, tier: null };
     }
 
     const guess = await fetchUrl(`https://${domain}${PATHS[kind]}`);
     if (looksRight(guess.hit, keyword)) {
         log.info('Resolved via path', { domain, kind, url: guess.hit.url });
-        return guess;
+        return guess; // already tier: 'path', set by fetchUrl
     }
 
     const cached = await readCache(key);
-    if (cached) return { hit: cached, fromCache: true, key };
+    if (cached) return { hit: cached, fromCache: true, key, tier: 'search' };
 
     // Same rule as fetchUrl: only a search that actually completed and found nothing
     // usable counts as a miss. A thrown search (auth, network, the child Actor
@@ -169,7 +186,7 @@ export async function findList(domain: string, kind: ListKind): Promise<Resolved
             if (looksRight(hit, keyword)) {
                 log.info('Resolved via search', { domain, kind, url: hit.url });
                 await writeCache(key, hit);
-                return { hit, fromCache: false, key };
+                return { hit, fromCache: false, key, tier: 'search' };
             }
         }
     } catch (err) {
@@ -178,5 +195,5 @@ export async function findList(domain: string, kind: ListKind): Promise<Resolved
 
     log.warning('No list found', { domain, kind });
     if (searchCompleted) await writeMiss(key, 'no-match');
-    return { hit: null, fromCache: false, key };
+    return { hit: null, fromCache: false, key, tier: null };
 }
