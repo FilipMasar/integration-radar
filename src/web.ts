@@ -31,7 +31,11 @@ export interface Resolved {
      *     (brightdata.com resolved to two different URLs on two consecutive runs), so a
      *     `NEW` finding sourced from a search hit is weaker evidence and must be flagged
      *     rather than reported with the same confidence.
-     * `null` when nothing resolved.
+     *
+     * **`tier` describes which mechanism ran, not whether it succeeded — always check
+     * `hit !== null` first.** `findList` returns `null` when nothing resolved, but
+     * `fetchUrl` returns `'path'` even on its give-up path, because the path tier is the
+     * only mechanism it has. Reading `tier` alone as a success signal is wrong.
      */
     tier: 'path' | 'search' | null;
 }

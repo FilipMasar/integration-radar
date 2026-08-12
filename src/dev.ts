@@ -9,8 +9,8 @@ process.loadEnvFile?.('.env');
 await Actor.init();
 
 for (const domain of ['apify.com', 'firecrawl.dev', 'zyte.com', 'brightdata.com']) {
-    const { hit, fromCache } = await findList(domain, 'integrations');
-    log.info('==>', { domain, url: hit?.url ?? 'NOT FOUND', chars: hit?.markdown.length, fromCache });
+    const { hit, fromCache, tier } = await findList(domain, 'integrations');
+    log.info('==>', { domain, url: hit?.url ?? 'NOT FOUND', chars: hit?.markdown.length, fromCache, tier });
 }
 
 await Actor.exit();
