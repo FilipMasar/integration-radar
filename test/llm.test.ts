@@ -32,9 +32,8 @@ vi.mock('apify', () => ({
     log: { info: vi.fn(), warning: vi.fn() },
 }));
 
-const { describeCandidates, extractCompetitors, extractNames, isListPage, sanitizeCandidateName, stripFences } = await import(
-    '../src/llm.js'
-);
+const { describeCandidates, extractCompetitors, extractNames, isListPage, sanitizeCandidateName, seedCompetitors, stripFences } =
+    await import('../src/llm.js');
 
 function page(markdown: string, url = 'https://example.com/alternatives'): PageHit {
     return { url, markdown };
@@ -160,6 +159,37 @@ describe('extractCompetitors', () => {
         const args = mockCreate.mock.calls[0][0];
         expect(args.temperature).toBe(0);
         expect(args.response_format).toEqual({ type: 'json_object' });
+    });
+});
+
+describe('seedCompetitors', () => {
+    it('returns cleaned competitors from the model', async () => {
+        mockCreate.mockResolvedValueOnce(
+            json(JSON.stringify({ competitors: [{ name: 'Rival', domain: 'https://www.rival.com/pricing' }] })),
+        );
+
+        expect(await seedCompetitors('mine.com', 20)).toEqual([{ name: 'Rival', domain: 'rival.com' }]);
+    });
+
+    it('asks for the requested number and names the domain in the prompt', async () => {
+        mockCreate.mockResolvedValueOnce(json(JSON.stringify({ competitors: [] })));
+
+        await seedCompetitors('mine.com', 7);
+
+        expect(sentPrompt()).toContain('mine.com');
+        expect(sentPrompt()).toContain('7');
+    });
+
+    it('returns an empty array when the model returns nothing usable', async () => {
+        mockCreate.mockResolvedValueOnce(json(JSON.stringify({ competitors: [{ name: 'Bad', domain: '' }] })));
+
+        expect(await seedCompetitors('mine.com', 20)).toEqual([]);
+    });
+
+    it('returns an empty array when every LLM attempt fails', async () => {
+        mockCreate.mockRejectedValue(new Error('boom'));
+
+        expect(await seedCompetitors('mine.com', 20)).toEqual([]);
     });
 });
 

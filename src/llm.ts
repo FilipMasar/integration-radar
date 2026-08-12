@@ -3,6 +3,7 @@ import OpenAI from 'openai';
 import { z } from 'zod';
 
 import type { Company, ListKind, PageHit, RawCandidate } from './pure.js';
+import { normalizeCompetitors } from './pure.js';
 
 /**
  * Lazy singleton, same shape as `getStore()` in `src/store.ts`: constructed on first
@@ -123,6 +124,52 @@ ${page.markdown.slice(0, MAX_CHARS)}`,
 
     const unique = [...new Map(cleaned.map((c) => [c.domain, c])).values()];
     log.info('Extracted competitors', { found: result.competitors.length, usable: unique.length });
+    return unique;
+}
+
+/**
+ * The competitor set, from the model's own knowledge rather than from a page.
+ *
+ * This replaced reading the analyzed company's `/alternatives` page, which only works
+ * where companies publish a multi-competitor comparison list — measured as a
+ * scraping/dev-tools convention, absent on all 22 mainstream SaaS domains probed, and a
+ * fatal single point of failure when absent.
+ *
+ * **The seed only decides where to look.** Every candidate integration is still extracted
+ * from a competitor's own fetched page and still cited in `carriedBy`, so this does not put
+ * model opinion into the output — asking a model *which integrations exist* would, and this
+ * Actor never does that. A hallucinated domain here simply fails to resolve and contributes
+ * nothing, which is the same path as the half of any real competitor set that resolves
+ * nothing anyway.
+ *
+ * Ordering is meaningful: the caller keeps the model's order and cuts to `max`, so the
+ * prompt asks for most-direct-competitor-first. Callers cache the result permanently
+ * (see `readSeed` in store.ts) — a seed that re-rolls between runs fabricates NEW.
+ */
+export async function seedCompetitors(domain: string, max: number): Promise<Company[]> {
+    const result = await completeJson(
+        `Name up to ${max} companies that compete directly with the company at ${domain}.
+
+Order them most-direct-competitor first.
+
+Give each one's name and its primary website domain as a bare domain, no scheme or path.
+
+Only give a domain you are confident about. Some are not what they look like: Jina AI is
+jina.ai (not jinaai.com), Browse AI is browse.ai, Import.io is import.io, Make is make.com.
+If you are not confident, use an empty string rather than guessing.
+
+Exclude ${domain} itself. Exclude product categories, and exclude companies that merely
+integrate with it rather than competing with it.
+
+Reply as {"competitors": [{"name": "...", "domain": "..."}]}`,
+        CompetitorsSchema,
+        EXTRACT_SYSTEM,
+    );
+
+    if (!result) return [];
+
+    const unique = normalizeCompetitors(result.competitors);
+    log.info('Seeded competitors', { domain, returned: result.competitors.length, usable: unique.length });
     return unique;
 }
 
