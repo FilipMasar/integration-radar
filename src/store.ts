@@ -6,33 +6,15 @@ import type { Company, Memory, PageHit } from './pure.js';
 /**
  * A *named* store, so it survives between runs — unnamed stores are deleted once the
  * run falls out of the 10 most recent. It holds the page cache (Markdown plus the names
- * extracted from it) and the previous run's candidate list.
+ * extracted from it), the competitor seed, and the previous run's candidate list.
+ *
+ * Cached after the first successful open. A failed open leaves `store` null, so the next
+ * caller retries rather than inheriting the failure.
  */
 let store: KeyValueStore | null = null;
-let storePromise: Promise<KeyValueStore> | null = null;
 
-/**
- * Bounded concurrency (mapLimit) means multiple callers can race here before `store`
- * is first assigned. Sharing one in-flight promise means every racer awaits the same
- * open call instead of each issuing its own `Actor.openKeyValueStore` — almost
- * certainly harmless either way (the platform resolves same-named stores to the same
- * underlying store), but this avoids the redundant calls outright.
- *
- * A failed open must not poison every later call for the life of the process: the
- * `.catch` clears `storePromise` before rethrowing, so the next `getStore()` call
- * retries with a fresh `Actor.openKeyValueStore` instead of re-awaiting (and
- * re-throwing) the same stale rejection forever — the property the old plain-`let`
- * version had implicitly, since `store` stayed `null` on error.
- */
 export async function getStore(): Promise<KeyValueStore> {
-    if (store) return store;
-    if (!storePromise) {
-        storePromise = Actor.openKeyValueStore('integration-radar').catch((err: unknown) => {
-            storePromise = null;
-            throw err;
-        });
-    }
-    store = await storePromise;
+    if (!store) store = await Actor.openKeyValueStore('integration-radar');
     return store;
 }
 
