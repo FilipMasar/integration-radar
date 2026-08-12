@@ -1,13 +1,13 @@
 import { Actor, log } from 'apify';
 import type { ListKind, PageHit } from './pure.js';
 import { PATHS } from './pure.js';
-import { cacheKey, readCache, writeCache } from './store.js';
+import { cacheKey, readCache, readMiss, writeCache, writeMiss } from './store.js';
 
 const RAG_WEB_BROWSER = 'apify/rag-web-browser';
 
 /** Below this a "page" is a nav shell, a parking page, or an error. */
-const MIN_CHARS = 800;
-const MIN_LINKS = 5;
+export const MIN_CHARS = 800;
+export const MIN_LINKS = 5;
 
 interface RagItem {
     markdown?: string;
@@ -35,10 +35,14 @@ async function runRagBrowser(query: string, render: boolean, maxResults: number)
             outputFormats: ['markdown'],
             scrapingTool: render ? 'browser-playwright' : 'raw-http',
         },
-        // 120s ceiling: a browser render of pipedream.com/apps was observed hanging
-        // for ~157s during Task 2 before eventually failing. Without this, one bad
-        // page stalls the whole run.
-        { memory: 1024, timeout: 120 },
+        // The timeout bounds the damage of a hang; the memory addresses its cause.
+        // Both live Playwright renders in verification logged "Memory is critically
+        // overloaded. Using 976 MB of 1024 MB (95%)" — almost certainly the actual
+        // mechanism behind the ~157s pipedream.com/apps hang that motivated the
+        // timeout in the first place, not an unrelated fluke. Only the retry path
+        // (render === true) pays the higher rate; raw-http fetches, which are cheap
+        // and never approach that ceiling, stay at 1024 MB.
+        render ? { memory: 4096, timeout: 180 } : { memory: 1024, timeout: 60 },
     );
     const { items } = await client.dataset(run.defaultDatasetId).listItems();
     return items as unknown as RagItem[];
@@ -50,12 +54,12 @@ function toPageHit(item: RagItem, fallbackUrl: string): PageHit | null {
     return { url: item.metadata?.url ?? item.searchResult?.url ?? fallbackUrl, markdown };
 }
 
-function countLinks(markdown: string): number {
+export function countLinks(markdown: string): number {
     return (markdown.match(/\]\(/g) ?? []).length;
 }
 
 /** Thin means client-rendered, a nav shell, or a parking page. */
-function isThin(hit: PageHit | null): boolean {
+export function isThin(hit: PageHit | null): boolean {
     return !hit || hit.markdown.length < MIN_CHARS || countLinks(hit.markdown) < MIN_LINKS;
 }
 
@@ -70,6 +74,12 @@ export async function fetchUrl(url: string): Promise<Resolved> {
     if (cached) {
         log.info('Cache hit', { url });
         return { hit: cached, fromCache: true, key };
+    }
+
+    // Skip straight past a domain that failed both engines recently — this also
+    // covers Task 6's fixed directory URLs, not just findList's own callers.
+    if (await readMiss(key)) {
+        return { hit: null, fromCache: true, key };
     }
 
     for (const render of [false, true]) {
@@ -88,11 +98,23 @@ export async function fetchUrl(url: string): Promise<Resolved> {
             log.warning('Fetch error', { url, render, error: (err as Error).message });
         }
     }
+    await writeMiss(key);
     return { hit: null, fromCache: false, key };
 }
 
 /** An article about integrations is not a list of them, and it passes the keyword test. */
-const ARTICLE_RE = /\/(blog|news|post|posts|article|guides?|changelog|docs\/[^/]*tutorial)\//i;
+export const ARTICLE_RE = /\/(blog|news|post|posts|article|guides?|changelog|docs\/[^/]*tutorial)\//i;
+
+/**
+ * Whether a fetched page is actually the list it claims to be, not a homepage, an
+ * article that happens to mention the keyword, or a thin shell. Requiring the keyword
+ * for BOTH `kind`s is what rejects a homepage served from `/integrations/` —
+ * ScraperAPI does exactly this. Exported (and taking `keyword` as a plain argument
+ * rather than closing over `kind`) so it's unit-testable on its own.
+ */
+export function looksRight(hit: PageHit | null, keyword: string): hit is PageHit {
+    return !isThin(hit) && hit!.markdown.toLowerCase().includes(keyword) && !ARTICLE_RE.test(hit!.url);
+}
 
 /**
  * One path guess, then a site-scoped search. The guess is cheap and deterministic;
@@ -104,21 +126,21 @@ const ARTICLE_RE = /\/(blog|news|post|posts|article|guides?|changelog|docs\/[^/]
  */
 export async function findList(domain: string, kind: ListKind): Promise<Resolved> {
     const keyword = kind === 'alternatives' ? 'alternativ' : 'integrat';
+    const key = cacheKey('search', `${domain}-${kind}`);
 
-    const looksRight = (hit: PageHit | null): hit is PageHit =>
-        !isThin(hit) &&
-        // Requiring the keyword for BOTH kinds is what rejects a homepage served from
-        // /integrations/ — ScraperAPI does exactly this.
-        hit!.markdown.toLowerCase().includes(keyword) &&
-        !ARTICLE_RE.test(hit!.url);
+    // Checked before the path guess even runs, so a domain already known to have
+    // neither a guessable page nor a findable one via search costs zero child calls
+    // on this run, not just a cheaper miss on the search tier alone.
+    if (await readMiss(key)) {
+        return { hit: null, fromCache: true, key };
+    }
 
     const guess = await fetchUrl(`https://${domain}${PATHS[kind]}`);
-    if (looksRight(guess.hit)) {
+    if (looksRight(guess.hit, keyword)) {
         log.info('Resolved via path', { domain, kind, url: guess.hit.url });
         return guess;
     }
 
-    const key = cacheKey('search', `${domain}-${kind}`);
     const cached = await readCache(key);
     if (cached) return { hit: cached, fromCache: true, key };
 
@@ -127,7 +149,7 @@ export async function findList(domain: string, kind: ListKind): Promise<Resolved
         const items = await runRagBrowser(`site:${domain} ${kind}`, false, 2);
         for (const item of items) {
             const hit = toPageHit(item, `https://${domain}`);
-            if (looksRight(hit)) {
+            if (looksRight(hit, keyword)) {
                 log.info('Resolved via search', { domain, kind, url: hit.url });
                 await writeCache(key, hit);
                 return { hit, fromCache: false, key };
@@ -138,5 +160,6 @@ export async function findList(domain: string, kind: ListKind): Promise<Resolved
     }
 
     log.warning('No list found', { domain, kind });
+    await writeMiss(key);
     return { hit: null, fromCache: false, key };
 }
