@@ -187,6 +187,50 @@ export function diffAgainstPrevious(
 }
 
 /**
+ * Splits `mapLimit`'s per-item results into the ones that resolved and a flag for
+ * whether *every* item resolved. `fullCoverage` is what makes the carry-forward rule
+ * in `mergePreviousSlugs` possible: a single unresolved competitor or directory this
+ * run means this run's candidate list is incomplete evidence, not proof that anything
+ * disappeared.
+ */
+export function partitionResolved<T>(results: (T | null)[]): { items: T[]; fullCoverage: boolean } {
+    return {
+        items: results.filter((r): r is T => r !== null),
+        fullCoverage: results.every((r) => r !== null),
+    };
+}
+
+/**
+ * Decides what to persist as "last run's candidates" for the next run's NEW/SEEN tag.
+ *
+ * Measured across three consecutive runs against identical domains: `brightdata.com`
+ * resolved twice and then came back NOT FOUND; `zyte.com` returned a wrong page, then
+ * correctly nothing, then the wrong page again. Nothing changed upstream — this is
+ * search flakiness and browser-render flakiness, not the world changing. If a source
+ * fails to resolve, any candidate that depended on it silently falls out of this run's
+ * `currentSlugs` (`computeGaps` only aggregates positive evidence, it has no way to
+ * distinguish "gone" from "the source that carried it didn't answer this time"). Naively
+ * overwriting memory with `currentSlugs` would then forget that candidate; the next time
+ * the flaky source resolves again, `diffAgainstPrevious` would tag it `NEW` a second
+ * time — a source that merely failed to resolve reads as "these integrations are new,"
+ * which is exactly backwards.
+ *
+ * When `fullCoverage` is true (every intended source resolved this run), `currentSlugs`
+ * is a complete picture and safely supersedes memory outright — this is what still lets
+ * a genuine removal eventually drop out. When it is false, previously-known slugs are
+ * carried forward untouched (unioned in, never dropped) rather than silently erased —
+ * a run with incomplete coverage can only ever add to memory, never shrink it.
+ */
+export function mergePreviousSlugs(
+    previousSlugs: string[],
+    currentSlugs: string[],
+    fullCoverage: boolean,
+): string[] {
+    if (fullCoverage) return currentSlugs;
+    return [...new Set([...previousSlugs, ...currentSlugs])];
+}
+
+/**
  * Run `fn` over `items` with bounded concurrency, preserving input order.
  * Every fetch is a child Actor run of 15-40s, so a sequential loop over 25
  * competitors is a 15-minute run.

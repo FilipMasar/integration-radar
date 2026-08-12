@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { computeGaps, diffAgainstPrevious, mapLimit, normalizeName } from '../src/pure.js';
+import {
+    computeGaps,
+    diffAgainstPrevious,
+    mapLimit,
+    mergePreviousSlugs,
+    normalizeName,
+    partitionResolved,
+} from '../src/pure.js';
 
 describe('normalizeName', () => {
     it('lowercases and collapses punctuation', () => {
@@ -94,6 +101,77 @@ describe('diffAgainstPrevious', () => {
     it('does not resurrect candidates that have disappeared', () => {
         const tags = diffAgainstPrevious(['gone'], ['clay']);
         expect(tags.has('gone')).toBe(false);
+    });
+});
+
+describe('partitionResolved', () => {
+    it('keeps only the non-null results', () => {
+        const { items } = partitionResolved([1, null, 2, null, 3]);
+        expect(items).toEqual([1, 2, 3]);
+    });
+
+    it('reports full coverage when nothing is null', () => {
+        expect(partitionResolved([1, 2, 3]).fullCoverage).toBe(true);
+    });
+
+    it('reports incomplete coverage when even one item is null', () => {
+        expect(partitionResolved([1, null, 3]).fullCoverage).toBe(false);
+    });
+
+    it('treats an empty list as full coverage — there is nothing left unresolved', () => {
+        expect(partitionResolved([]).fullCoverage).toBe(true);
+    });
+});
+
+describe('mergePreviousSlugs', () => {
+    it('replaces memory outright on full coverage, dropping what genuinely disappeared', () => {
+        // This is the behavior a naive `savePrevious(currentSlugs)` also gets right —
+        // the point of this test is to confirm fullCoverage=true does not carry forward.
+        expect(mergePreviousSlugs(['a', 'b'], ['b', 'c'], true)).toEqual(['b', 'c']);
+    });
+
+    it('carries forward a slug missing from this run when coverage was incomplete', () => {
+        // The exact bug this rule targets: a naive `mergePreviousSlugs` that always
+        // returns `currentSlugs` (i.e. ignores `fullCoverage`) would return ['b'] here,
+        // silently forgetting 'a' even though nothing proved it was gone.
+        const merged = mergePreviousSlugs(['a', 'b'], ['b'], false);
+        expect(new Set(merged)).toEqual(new Set(['a', 'b']));
+    });
+
+    it('does not duplicate a slug present in both previous and current', () => {
+        const merged = mergePreviousSlugs(['a'], ['a'], false);
+        expect(merged).toEqual(['a']);
+    });
+
+    it('is not fooled by an empty previous run', () => {
+        expect(new Set(mergePreviousSlugs([], ['a', 'b'], false))).toEqual(new Set(['a', 'b']));
+    });
+
+    it('end to end: a flaky source never produces a spurious second NEW', () => {
+        // Simulates the measured scenario: brightdata.com resolves, then fails to
+        // resolve, then resolves again, across three runs of an otherwise-unchanged
+        // candidate set.
+        let memory: string[] = [];
+
+        // Run 1: full coverage, baseline.
+        let current = ['brightdata-candidate', 'stable-candidate'];
+        let tags = diffAgainstPrevious(memory, current);
+        expect(tags.get('brightdata-candidate')).toBe('NEW');
+        memory = mergePreviousSlugs(memory, current, true);
+
+        // Run 2: brightdata.com fails to resolve, so its candidate drops out of this
+        // run's evidence. Coverage is incomplete.
+        current = ['stable-candidate'];
+        tags = diffAgainstPrevious(memory, current);
+        expect(tags.get('stable-candidate')).toBe('SEEN');
+        memory = mergePreviousSlugs(memory, current, false);
+        expect(memory).toContain('brightdata-candidate'); // carried forward, not erased
+
+        // Run 3: brightdata.com resolves again. A naive implementation that overwrote
+        // memory in run 2 would tag this NEW a second time; it must read SEEN.
+        current = ['brightdata-candidate', 'stable-candidate'];
+        tags = diffAgainstPrevious(memory, current);
+        expect(tags.get('brightdata-candidate')).toBe('SEEN');
     });
 });
 
