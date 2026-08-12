@@ -66,7 +66,7 @@ log.info('Done', {
     fullCoverage: summary.fullCoverage,
     memoryReplaced: summary.memoryReplaced,
     chargedEvents: summary.chargedEvents,
-    chargeLimitReached: summary.chargeLimitReached,
+    chargingState: summary.chargingState,
 });
 
 await Actor.exit();
