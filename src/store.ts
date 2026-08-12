@@ -2,6 +2,7 @@ import type { KeyValueStore } from 'apify';
 import { Actor, log } from 'apify';
 
 import type { Company, Memory, PageHit } from './pure.js';
+import { sourceName } from './pure.js';
 
 /**
  * A *named* store, so it survives between runs — unnamed stores are deleted once the
@@ -224,6 +225,63 @@ export async function readMiss(key: string): Promise<boolean> {
 export async function writeMiss(key: string): Promise<void> {
     const kv = await getStore();
     await kv.setValue(missKey(key), { missedAt: new Date().toISOString() } satisfies MissRecord);
+}
+
+interface SeedRecord {
+    /**
+     * Observability only, and deliberately never compared against a TTL — see `readSeed`.
+     * Unlike a field nothing reads, this one earns its place precisely *because* the record
+     * never expires: without it a human inspecting the store cannot tell whether a seed was
+     * derived today or a year ago.
+     */
+    seededAt: string;
+    competitors: Company[];
+}
+
+/**
+ * Keyed on the inputs that actually determine the seed, NOT on the full input
+ * fingerprint. The fingerprint includes `directories`, which has no bearing on which
+ * competitors exist — keying on it would re-derive, and possibly shift, the competitor set
+ * every time a user edited an unrelated directory URL. The *memory* fingerprint still
+ * includes `directories`, so such an edit still declares one BASELINE run; it just no
+ * longer re-rolls the competitor set at the same time.
+ *
+ * The domain goes through `sourceName`, unlike `loadPrevious`'s raw-string key (whose
+ * uppercase trap is documented there), so `Apify.com` and `apify.com` cannot fork.
+ */
+function seedKey(domain: string, maxCompetitors: number): string {
+    return cacheKey('seed', `${sourceName(domain)}-${maxCompetitors}`);
+}
+
+/**
+ * The competitor seed. **Read with no expiry check, on purpose — the only record here
+ * that works that way.**
+ *
+ * The seed is the source set the entire diff rests on. A seed that re-rolls between runs
+ * makes candidates silently enter and leave the evidence base, which is the fabricated-NEW
+ * problem the (now removed) competitor page cache was originally added to fix. So it is
+ * derived once and kept: new competitors enter only when the key changes
+ * (`maxCompetitors`, the domain) or when a user passes `competitors` explicitly or deletes
+ * this record.
+ *
+ * Returns `null` for "nothing stored", never `[]` — an empty seed is fatal upstream and is
+ * never written, and `[]` would read back as a hit.
+ */
+export async function readSeed(domain: string, maxCompetitors: number): Promise<Company[] | null> {
+    const kv = await getStore();
+    const record = await kv.getValue<SeedRecord>(seedKey(domain, maxCompetitors));
+    if (!record?.competitors?.length) return null;
+    log.info('Competitor seed from cache', { domain, count: record.competitors.length, seededAt: record.seededAt });
+    return record.competitors;
+}
+
+export async function writeSeed(domain: string, maxCompetitors: number, competitors: Company[]): Promise<void> {
+    if (competitors.length === 0) return;
+    const kv = await getStore();
+    await kv.setValue(seedKey(domain, maxCompetitors), {
+        seededAt: new Date().toISOString(),
+        competitors,
+    } satisfies SeedRecord);
 }
 
 /**

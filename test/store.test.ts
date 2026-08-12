@@ -32,6 +32,7 @@ const {
     readListPageVerdict,
     readMiss,
     readNames,
+    readSeed,
     savePrevious,
     ttlHours,
     writeCache,
@@ -39,6 +40,7 @@ const {
     writeListPageVerdict,
     writeMiss,
     writeNames,
+    writeSeed,
 } = await import('../src/store.js');
 
 const PAGE = { url: 'https://example.com/integrations', markdown: 'hello' };
@@ -277,6 +279,51 @@ describe('readMiss / writeMiss', () => {
         process.env.MISS_TTL_HOURS = '0';
         expect(await readMiss('key')).toBe(false); // forced miss expiry...
         expect(await readCache('key')).toEqual(PAGE); // ...must not expire the page
+    });
+});
+
+describe('readSeed / writeSeed', () => {
+    const RIVALS = [{ name: 'Rival', domain: 'rival.com' }];
+
+    it('round-trips a seed', async () => {
+        await writeSeed('mine.com', 20, RIVALS);
+        expect(await readSeed('mine.com', 20)).toEqual(RIVALS);
+    });
+
+    it('returns null when nothing is stored', async () => {
+        expect(await readSeed('never-seeded.com', 20)).toBeNull();
+    });
+
+    it('never expires, however old the record is', async () => {
+        await writeSeed('ancient.com', 20, RIVALS);
+        const key = [...kvData.keys()].find((k) => k.includes('ancient-com'))!;
+        kvData.set(key, { seededAt: hoursAgo(24 * 365), competitors: RIVALS });
+
+        // The one record in this store with no TTL. If a later change adds an expiry
+        // check here, this fails — which is the point: a re-rolled seed fabricates NEW.
+        expect(await readSeed('ancient.com', 20)).toEqual(RIVALS);
+    });
+
+    it('never writes an empty seed', async () => {
+        await writeSeed('empty.com', 20, []);
+        // Checked at the storage layer, not just through readSeed: readSeed's own
+        // `record?.competitors?.length` check would mask a written `competitors: []`
+        // record and read it back as null regardless, so asserting only the read
+        // outcome would pass even if writeSeed's guard were deleted. Confirming no
+        // key was ever created is what actually proves the write was skipped.
+        expect([...kvData.keys()].some((k) => k.includes('empty-com'))).toBe(false);
+        expect(await readSeed('empty.com', 20)).toBeNull();
+    });
+
+    it('keys separately per maxCompetitors', async () => {
+        await writeSeed('mine.com', 5, RIVALS);
+        expect(await readSeed('mine.com', 5)).toEqual(RIVALS);
+        expect(await readSeed('mine.com', 6)).toBeNull();
+    });
+
+    it('normalizes the domain so casing and www cannot fork the record', async () => {
+        await writeSeed('https://www.Mine.com/', 20, RIVALS);
+        expect(await readSeed('mine.com', 20)).toEqual(RIVALS);
     });
 });
 
