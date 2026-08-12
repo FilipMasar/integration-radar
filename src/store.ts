@@ -279,6 +279,16 @@ interface PreviousRun extends Partial<StoredMemory> {
  * three apart: no record is a genuine first run, while a record with no fingerprint was
  * written under unknown conditions and must be treated as a baseline rather than
  * silently diffed against.
+ *
+ * **Trap for whoever relaxes `companyDomain`'s lowercase-only input pattern.** This key
+ * and `savePrevious`'s are built from the *raw* `companyDomain` string, unlike everything
+ * else downstream, which runs it through `sourceName` (the fingerprint, both dedup
+ * comparisons). That is safe only because the input schema rejects uppercase today. The
+ * moment `Apify.com` becomes valid input it gets its own memory record, silently
+ * rebaselines against `apify.com`'s history, and reports a full page of `NEW` — the exact
+ * defect this whole mechanism exists to prevent. Normalize with `sourceName` at *both*
+ * ends of this pair in the same change that relaxes the pattern, and note that existing
+ * records keyed on a raw string do not migrate themselves.
  */
 export async function loadPrevious(companyDomain: string): Promise<StoredMemory | null> {
     const kv = await getStore();

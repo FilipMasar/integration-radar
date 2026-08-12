@@ -313,18 +313,61 @@ export function partitionResolved<T>(results: (T | null)[]): { items: T[]; fullC
  * only when this run's resolved sources are a superset of the sources the *stored* slugs
  * rest on — i.e. we looked everywhere memory came from and more. Otherwise union, and
  * union the source bases too, so the basis always describes the slugs actually held (a
- * source that contributed three runs ago is still part of what memory rests on). This is
- * strictly stronger than the old gate *and* strictly easier to satisfy in practice:
- * `fullCoverage` needs all 20 competitors to resolve and essentially never fires, while
- * "no regression in coverage" fires on any two consecutive runs that read the same nine.
- * That is what makes the removal property real rather than aspirational: a candidate a
- * competitor genuinely dropped falls out of memory on the next run that covers
- * everything memory was built from.
+ * source that contributed three runs ago is still part of what memory rests on).
  *
  * `inputsChanged` (see `inputFingerprint`) forces a union — the caller also reports that
  * run as a baseline, so no `NEW` is displayed — but resets the source basis to this
  * run's, because the previous configuration's sources are not coming back and leaving
  * them in the basis would freeze memory forever.
+ *
+ * ---
+ *
+ * **What this gate certifies, and what it does not.** It is stronger than `fullCoverage`
+ * against the three triggers above, but it is NOT strictly safer overall, and it does not
+ * close the fabricated-`NEW` problem. Read the limits before trusting it further than
+ * they allow.
+ *
+ * 1. **It certifies source *availability*, not source *content*.** The superset test is
+ *    at source-*name* granularity: it says "we read `rival.com` again", not "we read the
+ *    same page and extracted the same names from it". A search-tier competitor that
+ *    resolves to a *different* page than last run (`brightdata.com` did exactly this
+ *    across two consecutive runs, per this codebase's own measurements) still satisfies
+ *    the test, so memory is replaced and every candidate only the better page carried is
+ *    erased — returning as `NEW` when that page comes back. The same holds with no URL
+ *    change at all: past the 24h page TTL the page is refetched and re-extracted, and an
+ *    LLM listing 95 names does not return the identical 95 every time.
+ *
+ *    **This class is newly reachable, and it is the trade this design makes.** Under
+ *    `fullCoverage` the replace branch essentially never fired, so memory only ever grew
+ *    and content instability could not erase anything. This gate is *designed* to fire
+ *    routinely — that is what makes the removal property real instead of aspirational —
+ *    and firing routinely is exactly what makes this class live. The trade is: a class of
+ *    content-jitter `NEW` in exchange for removals actually dropping out. Deliberate, and
+ *    the right call for this Actor, but it is a trade and not a fix.
+ *
+ * 2. **It governs memory, not the tag.** `diffAgainstPrevious` reads `previous.slugs`
+ *    whatever this function decides. So this stops run N's *loss* of memory from becoming
+ *    run N+1's `NEW`; it does nothing about run N's *gain*. If `extractCompetitors`
+ *    returns one competitor more than last run — at least as likely as one fewer — or a
+ *    source that missed last run resolves this run, the basis has only grown, the
+ *    superset test still passes, and every name only that new source carries is tagged
+ *    `NEW`. Nothing changed in the world; we looked somewhere new. `weakEvidence` catches
+ *    only the search-tier subset of this.
+ *
+ * 3. **The basis accumulates, so the removal property decays.** `sources` is
+ *    monotonically non-decreasing across unions and only resets on a replace or a
+ *    fingerprint change. With the flaky coverage this codebase documents, it grows toward
+ *    the union of everything ever seen while any single run resolves a subset, so the
+ *    superset test starts failing routinely and behaviour degrades back to union-only.
+ *    **Terminal case:** if any source in the basis becomes permanently unresolvable (a
+ *    competitor shuts down, a directory 404s for good, the model stops naming a
+ *    competitor that had contributed), the test can never be satisfied again and memory
+ *    for that domain is frozen forever — it only grows, removals never drop out, and
+ *    nothing reports it. The direction is safe and it is still strictly better than the
+ *    old gate, which was in that locked state from run 1; the escape today is a
+ *    `maxCompetitors`/`directories` change, at the cost of one `BASELINE` run. The cheap
+ *    real fix, if this bites: store the basis as `{name, lastSeenRun}` and require
+ *    coverage only of entries seen within the last N runs.
  */
 export function mergeMemory(
     previous: Memory,
