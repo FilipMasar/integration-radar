@@ -1,0 +1,11 @@
+{
+    "actorOutputSchemaVersion": 1,
+    "title": "Integration Radar output",
+    "properties": {
+        "candidates": {
+            "type": "string",
+            "title": "Candidates",
+            "template": "{{links.apiDefaultDatasetUrl}}/items?clean=true"
+        }
+    }
+}

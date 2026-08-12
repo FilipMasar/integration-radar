@@ -12,3 +12,8 @@ tsconfig.tsbuildinfo
 
 # Added by Apify CLI
 .venv
+
+# Local secrets
+.env
+.env.*
+!.env.example

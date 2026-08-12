@@ -1,0 +1,34 @@
+{
+    "actorSpecification": 1,
+    "fields": {},
+    "views": {
+        "overview": {
+            "title": "Candidates",
+            "transformation": {
+                "fields": [
+                    "candidate",
+                    "description",
+                    "category",
+                    "peerCount",
+                    "directoryCount",
+                    "status",
+                    "weakEvidence",
+                    "carriedBy"
+                ]
+            },
+            "display": {
+                "component": "table",
+                "properties": {
+                    "candidate": { "label": "Name", "format": "text" },
+                    "description": { "label": "What it is", "format": "text" },
+                    "category": { "label": "Category", "format": "text" },
+                    "peerCount": { "label": "Competitors", "format": "number" },
+                    "directoryCount": { "label": "Directories", "format": "number" },
+                    "status": { "label": "Status", "format": "text" },
+                    "weakEvidence": { "label": "Weak evidence", "format": "boolean" },
+                    "carriedBy": { "label": "Found in", "format": "array" }
+                }
+            }
+        }
+    }
+}

@@ -1,20 +1,72 @@
-// Apify SDK - toolkit for building Apify Actors (Read more at https://docs.apify.com/sdk/js/)
+import { setTimeout } from 'node:timers/promises';
+
 import { Actor, log } from 'apify';
-// Crawlee - web scraping and browser automation library (Read more at https://crawlee.dev)
-// import { CheerioCrawler } from '@crawlee/cheerio';
 
-// this is ESM project, and as such, it requires you to specify extensions in your relative imports
-// read more about this here: https://nodejs.org/docs/latest-v18.x/api/esm.html#mandatory-file-extensions
-// note that we need to use `.js` even when inside TS files
-// import { router } from './routes.js';
+import { describeCandidates, extractCompetitors, extractNames, isListPage } from './llm.js';
+import type { Input } from './orchestrate.js';
+import { runIntegrationRadar } from './orchestrate.js';
+import {
+    loadPrevious,
+    readCompetitors,
+    readListPageVerdict,
+    readNames,
+    savePrevious,
+    writeCompetitors,
+    writeListPageVerdict,
+    writeNames,
+} from './store.js';
+import { fetchUrl, findList } from './web.js';
 
-// The init() call configures the Actor to correctly work with the Apify-provided environment - mainly the storage infrastructure. It is necessary that every Actor performs an init() call.
 await Actor.init();
 
-log.info('Hello from the Actor!');
-/**
- * Actor code
- */
+// Handle the `aborting` event so a stopped/cancelled run exits promptly rather than
+// continuing to make paid child-Actor and LLM calls after the user (or the platform)
+// asked it to stop. Per this project's AGENTS.md.
+Actor.on('aborting', async () => {
+    await setTimeout(1000);
+    await Actor.exit();
+});
 
-// Gracefully exit the Actor process. It's recommended to quit all Actors with an exit()
+const input = await Actor.getInput<Input>();
+if (!input) throw new Error('Input is missing!');
+
+// All the actual logic lives in orchestrate.ts's runIntegrationRadar, which takes
+// every external boundary as an injectable dependency — that's what makes it testable
+// without a live Actor environment (see orchestrate.ts's Deps doc comment). This is
+// wiring only: the real implementations, plus the two Actor methods that don't have a
+// standalone equivalent outside this SDK.
+const summary = await runIntegrationRadar(input, {
+    findList,
+    fetchUrl,
+    extractCompetitors,
+    extractNames,
+    isListPage,
+    describeCandidates,
+    readNames,
+    writeNames,
+    readCompetitors,
+    writeCompetitors,
+    readListPageVerdict,
+    writeListPageVerdict,
+    loadPrevious,
+    savePrevious,
+    pushData: async (rows) => Actor.pushData(rows),
+    // Passed through, not swallowed. `Actor.charge` returns a `ChargeResult` whose
+    // `chargedCount` can be lower than the requested `count` once the user's
+    // max-total-charge limit is reached; `runIntegrationRadar` checks it and warns.
+    charge: async (event) => Actor.charge(event),
+});
+
+log.info('Done', {
+    candidates: summary.rows.length,
+    totalRanked: summary.totalRanked,
+    new: summary.rows.filter((r) => r.status === 'NEW').length,
+    baseline: summary.isBaseline,
+    freshSources: summary.freshSources,
+    fullCoverage: summary.fullCoverage,
+    memoryReplaced: summary.memoryReplaced,
+    chargedEvents: summary.chargedEvents,
+    chargingState: summary.chargingState,
+});
+
 await Actor.exit();
