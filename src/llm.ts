@@ -235,8 +235,13 @@ export async function describeCandidates(
     if (candidates.length === 0) return out;
 
     // Each name is JSON-stringified (not just interpolated) so it reaches the model as
-    // one unambiguously-delimited literal value — quoted, with any remaining special
-    // characters escaped — rather than blending into the surrounding instruction text.
+    // one quoted literal with any remaining special characters escaped. Note what this
+    // is and is not: quoting is a syntactic boundary meaningful to a JSON parser, not a
+    // guarantee about how an LLM reads natural language. Combined with the sanitizer it
+    // defeats newline injection and long-block smuggling; a short, single-line,
+    // instruction-shaped product name can still reach the model, and nothing here
+    // prevents that. The defence that matters downstream is that the reply is schema-
+    // validated and the caller only ever reads `description` and `category`.
     // `c.slug` is not user text: it is always `normalizeName`'s output (pure.ts), which
     // only ever produces `[a-z0-9-]+`, so it needs no sanitizing here.
     const result = await completeJson(
