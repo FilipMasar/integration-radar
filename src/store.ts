@@ -1,7 +1,7 @@
 import type { KeyValueStore } from 'apify';
 import { Actor, log } from 'apify';
 
-import type { PageHit } from './pure.js';
+import type { Company, Memory, PageHit } from './pure.js';
 
 /**
  * A *named* store, so it survives between runs — unnamed stores are deleted once the
@@ -78,6 +78,12 @@ interface CacheRecord {
      * `names` below — see `readListPageVerdict`/`writeListPageVerdict`.
      */
     isListPage?: boolean;
+    /**
+     * The competitor set extracted from an alternatives page — the same co-location
+     * rule as `names`, for a page whose extraction has a different shape. See
+     * `readCompetitors`/`writeCompetitors`.
+     */
+    competitors?: Company[];
 }
 
 /** Returns null on a miss OR on an expired entry — expiry is what makes change detection possible. */
@@ -158,6 +164,41 @@ export async function writeListPageVerdict(key: string, isListPage: boolean): Pr
     if (record) await kv.setValue(key, { ...record, isListPage });
 }
 
+/**
+ * The competitor set extracted from an alternatives page, cached against that page's
+ * record exactly like `names` — same key, same TTL, same "cannot outlive the page it
+ * came from" guarantee.
+ *
+ * This was the one extraction with no cache, so an LLM re-derived the competitor set
+ * from a marketing page on *every* run, warm or cold. That matters far beyond cost:
+ * the competitor list is the source set the whole run is built on, and a set that is
+ * re-rolled every run is a set that can silently shrink, taking the candidates that
+ * only that competitor carried out of the run's evidence with it. Deciding once per
+ * cached page removes the re-roll within the TTL window and cuts an LLM call from
+ * every warm run.
+ *
+ * Returns `null` for "no competitors cached", never `[]` — an empty extraction is not
+ * worth caching (the caller treats it as fatal) and `[]` would read back as a hit.
+ */
+export async function readCompetitors(key: string): Promise<Company[] | null> {
+    const kv = await getStore();
+    const record = await kv.getValue<CacheRecord>(key);
+    if (!record?.competitors?.length) return null;
+
+    if (isExpired(record.fetchedAt, ttlHours(process.env.CACHE_TTL_HOURS, DEFAULT_CACHE_TTL_HOURS))) {
+        log.info('Competitors expired', { key });
+        return null;
+    }
+    return record.competitors;
+}
+
+export async function writeCompetitors(key: string, competitors: Company[]): Promise<void> {
+    const kv = await getStore();
+    const record = await kv.getValue<CacheRecord>(key);
+    // Only ever attach to an existing page record — same rule as writeNames.
+    if (record) await kv.setValue(key, { ...record, competitors });
+}
+
 export async function writeNames(key: string, names: string[]): Promise<void> {
     const kv = await getStore();
     const record = await kv.getValue<CacheRecord>(key);
@@ -216,24 +257,54 @@ export async function writeMiss(key: string, reason?: MissReason): Promise<void>
     await kv.setValue(missKey(key), { missedAt: new Date().toISOString(), reason } satisfies MissRecord);
 }
 
-interface PreviousRun {
-    date: string;
+/**
+ * `Memory` plus the conditions it was gathered under. The fingerprint is what lets the
+ * next run notice that it is about to diff against a picture taken through a different
+ * lens (a different `maxCompetitors`, a different `directories` list) and declare a
+ * baseline instead of inventing `NEW` rows — see `inputFingerprint` in `pure.ts`.
+ */
+export interface StoredMemory extends Memory {
+    /** `null` for a record written before fingerprinting existed. */
+    fingerprint: string | null;
+}
+
+interface PreviousRun extends Partial<StoredMemory> {
+    date?: string;
     slugs: string[];
 }
 
-export async function loadPrevious(companyDomain: string): Promise<string[]> {
+/**
+ * Returns `null` when there is no memory at all — distinct from a record whose `slugs`
+ * happen to be empty, and distinct from a pre-fingerprint record. The caller needs all
+ * three apart: no record is a genuine first run, while a record with no fingerprint was
+ * written under unknown conditions and must be treated as a baseline rather than
+ * silently diffed against.
+ */
+export async function loadPrevious(companyDomain: string): Promise<StoredMemory | null> {
     const kv = await getStore();
     const record = await kv.getValue<PreviousRun>(cacheKey('previous', companyDomain));
-    if (record) log.info('Loaded previous run', { date: record.date, count: record.slugs.length });
-    else log.info('No previous run — this is a baseline');
-    return record?.slugs ?? [];
+    if (!record) {
+        log.info('No previous run — this is a baseline');
+        return null;
+    }
+    log.info('Loaded previous run', {
+        date: record.date,
+        count: record.slugs.length,
+        sources: record.sources?.length ?? 0,
+        fingerprinted: record.fingerprint !== undefined,
+    });
+    return {
+        slugs: record.slugs,
+        sources: record.sources ?? [],
+        fingerprint: record.fingerprint ?? null,
+    };
 }
 
 export async function savePrevious(
     companyDomain: string,
-    slugs: string[],
+    memory: StoredMemory,
     runDate: string,
 ): Promise<void> {
     const kv = await getStore();
-    await kv.setValue(cacheKey('previous', companyDomain), { date: runDate, slugs });
+    await kv.setValue(cacheKey('previous', companyDomain), { date: runDate, ...memory });
 }

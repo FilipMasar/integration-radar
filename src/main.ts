@@ -7,9 +7,11 @@ import type { Input } from './orchestrate.js';
 import { runIntegrationRadar } from './orchestrate.js';
 import {
     loadPrevious,
+    readCompetitors,
     readListPageVerdict,
     readNames,
     savePrevious,
+    writeCompetitors,
     writeListPageVerdict,
     writeNames,
 } from './store.js';
@@ -42,6 +44,8 @@ const summary = await runIntegrationRadar(input, {
     describeCandidates,
     readNames,
     writeNames,
+    readCompetitors,
+    writeCompetitors,
     readListPageVerdict,
     writeListPageVerdict,
     loadPrevious,
@@ -57,6 +61,7 @@ log.info('Done', {
     baseline: summary.isBaseline,
     freshSources: summary.freshSources,
     fullCoverage: summary.fullCoverage,
+    memoryReplaced: summary.memoryReplaced,
 });
 
 await Actor.exit();

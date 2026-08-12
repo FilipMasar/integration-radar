@@ -35,6 +35,32 @@ export interface Candidate extends RawCandidate {
     status: 'NEW' | 'SEEN' | 'BASELINE';
 }
 
+/**
+ * What a run persists so the *next* run can tell NEW from SEEN.
+ *
+ * Two fields, and the second one is the whole point: a bag of slugs with no record of
+ * the conditions it was gathered under cannot be diffed honestly. `sources` says what
+ * evidence `slugs` rests on, so `mergeMemory` can tell "this candidate is gone" apart
+ * from "we did not look where it lives this time."
+ */
+export interface Memory {
+    /**
+     * Every candidate this run found *any* evidence for — the full ranked pool, before
+     * the `minSources` display filter and before the display row cap. What we remember
+     * and what we display are different things: `minSources` and the row cap are
+     * presentation knobs, and letting either of them shrink memory turns a knob-twiddle
+     * into a wave of fabricated `NEW` on the next run.
+     */
+    slugs: string[];
+    /**
+     * The normalized names (see `sourceName`) of every source that actually resolved and
+     * contributed names — i.e. exactly the evidence base `slugs` was computed from.
+     * On a union merge this accumulates, so it always describes what the *stored* slugs
+     * rest on, not just what the last run happened to read.
+     */
+    sources: string[];
+}
+
 // ---------- constants ----------
 
 /**
@@ -134,14 +160,35 @@ export function normalizeName(raw: string): string {
 }
 
 /**
- * The core diff. Everything at least `minSources` sources carry that `mine` lacks,
- * ranked by how many *competitors* carry it, then by total sources.
+ * Collapse a competitor domain or a directory URL to the one name both kinds of source
+ * are tracked under.
+ *
+ * Peer sources are minted from `competitor.domain` and directory sources from a URL's
+ * hostname, by two code paths that never see each other. Before this existed they shared
+ * a namespace without sharing a spelling: `zapier.com` as both a competitor and a
+ * directory counted as two independent sources for the same page of names (clearing the
+ * default `minSources: 2` on its own), and `www.make.com` vs `make.com` did the same
+ * without even colliding on the string. `tierBySource` is keyed by this name too, so the
+ * collision also silently overwrote a peer's `'search'` tier and cleared `weakEvidence`.
  */
-export function computeGaps(
-    mine: string[],
-    sources: SourceList[],
-    minSources: number,
-): RawCandidate[] {
+export function sourceName(raw: string): string {
+    const host = raw
+        .trim()
+        .toLowerCase()
+        .replace(/^[a-z][a-z0-9+.-]*:\/\//, '') // scheme
+        .split(/[/?#]/)[0]
+        .replace(/:\d+$/, ''); // port
+    return host.replace(/^www\./, '');
+}
+
+/**
+ * The full ranked candidate pool: everything any source carries that `mine` lacks,
+ * ranked by how many *competitors* carry it, then by total sources.
+ *
+ * Split out from `computeGaps` because memory must be computed from the unfiltered pool
+ * (see `Memory.slugs`) while the display list is computed from the filtered one.
+ */
+export function rankCandidates(mine: string[], sources: SourceList[]): RawCandidate[] {
     const owned = new Set(mine.map(normalizeName));
     const seen = new Map<
         string,
@@ -168,13 +215,50 @@ export function computeGaps(
             directoryCount: e.directories.length,
             carriedBy: [...e.peers, ...e.directories],
         }))
-        .filter((c) => c.peerCount + c.directoryCount >= minSources)
         .sort(
             (a, b) =>
                 b.peerCount - a.peerCount ||
                 b.directoryCount - a.directoryCount ||
                 a.slug.localeCompare(b.slug),
         );
+}
+
+/**
+ * The display list: the ranked pool, restricted to candidates at least `minSources`
+ * sources carry. A pure presentation filter — it must never be applied before memory
+ * is computed.
+ */
+export function computeGaps(
+    mine: string[],
+    sources: SourceList[],
+    minSources: number,
+): RawCandidate[] {
+    return rankCandidates(mine, sources).filter((c) => c.peerCount + c.directoryCount >= minSources);
+}
+
+/**
+ * A stable string identifying the inputs that determine *what a run looks at*.
+ *
+ * Memory keyed on `companyDomain` alone says nothing about the conditions it was
+ * gathered under, so the next run diffs against a picture taken through a different
+ * lens and calls the difference `NEW`. When this string changes, the run is a fresh
+ * baseline rather than a comparison — see `runIntegrationRadar`.
+ *
+ * `minSources` is deliberately NOT part of it. Memory now holds the full ranked pool
+ * (`Memory.slugs`), so `minSources` changes only what is displayed and can never move a
+ * slug in or out of memory — fingerprinting it would force a pointless baseline run.
+ */
+export function inputFingerprint(input: {
+    companyDomain: string;
+    maxCompetitors: number;
+    directories: string[];
+}): string {
+    return JSON.stringify({
+        companyDomain: sourceName(input.companyDomain),
+        maxCompetitors: input.maxCompetitors,
+        // Sorted and deduped: reordering the same list is not a different question.
+        directories: [...new Set(input.directories.map((u) => u.trim().toLowerCase().replace(/\/+$/, '')))].sort(),
+    });
 }
 
 /** Which of the current candidates were absent last time. */
@@ -188,10 +272,12 @@ export function diffAgainstPrevious(
 
 /**
  * Splits `mapLimit`'s per-item results into the ones that resolved and a flag for
- * whether *every* item resolved. `fullCoverage` is what makes the carry-forward rule
- * in `mergePreviousSlugs` possible: a single unresolved competitor or directory this
- * run means this run's candidate list is incomplete evidence, not proof that anything
- * disappeared.
+ * whether *every* item resolved.
+ *
+ * `fullCoverage` is observability only — it is logged and returned in `RunSummary` so a
+ * reader can see how blind a run was. It is deliberately NOT the gate on replacing
+ * memory any more; see `mergeMemory` for why "every source *attempted this run*
+ * resolved" is the wrong question.
  */
 export function partitionResolved<T>(results: (T | null)[]): { items: T[]; fullCoverage: boolean } {
     return {
@@ -201,33 +287,67 @@ export function partitionResolved<T>(results: (T | null)[]): { items: T[]; fullC
 }
 
 /**
- * Decides what to persist as "last run's candidates" for the next run's NEW/SEEN tag.
+ * Decides what to persist as "what we knew last run" for the next run's NEW/SEEN tag.
  *
- * Measured across three consecutive runs against identical domains: `brightdata.com`
- * resolved twice and then came back NOT FOUND; `zyte.com` returned a wrong page, then
- * correctly nothing, then the wrong page again. Nothing changed upstream — this is
- * search flakiness and browser-render flakiness, not the world changing. If a source
- * fails to resolve, any candidate that depended on it silently falls out of this run's
- * `currentSlugs` (`computeGaps` only aggregates positive evidence, it has no way to
- * distinguish "gone" from "the source that carried it didn't answer this time"). Naively
- * overwriting memory with `currentSlugs` would then forget that candidate; the next time
- * the flaky source resolves again, `diffAgainstPrevious` would tag it `NEW` a second
- * time — a source that merely failed to resolve reads as "these integrations are new,"
- * which is exactly backwards.
+ * **The problem.** Measured across three consecutive runs against identical domains:
+ * `brightdata.com` resolved twice and then came back NOT FOUND; `zyte.com` returned a
+ * wrong page, then correctly nothing, then the wrong page again. Nothing changed
+ * upstream — this is search flakiness and browser-render flakiness, not the world
+ * changing. If a source fails to resolve, any candidate that depended on it silently
+ * falls out of this run's slugs (`rankCandidates` only aggregates positive evidence; it
+ * has no way to distinguish "gone" from "the source that carried it didn't answer this
+ * time"). Naively overwriting memory would then forget that candidate, and the next time
+ * the flaky source resolves, `diffAgainstPrevious` tags it `NEW` a second time — a
+ * source that merely failed to resolve reads as "these integrations are new," which is
+ * exactly backwards.
  *
- * When `fullCoverage` is true (every intended source resolved this run), `currentSlugs`
- * is a complete picture and safely supersedes memory outright — this is what still lets
- * a genuine removal eventually drop out. When it is false, previously-known slugs are
- * carried forward untouched (unioned in, never dropped) rather than silently erased —
- * a run with incomplete coverage can only ever add to memory, never shrink it.
+ * **Why the old `fullCoverage` gate was not enough.** It certified that every source
+ * *attempted this run* resolved. It said nothing about whether this run attempted the
+ * same sources as last run. A competitor dropped before the resolution loop even starts
+ * — by `extractCompetitors` nondeterminism, by a `maxCompetitors` cut, or by the user
+ * passing a different `directories` list — never becomes an unresolved entry; the list
+ * is simply shorter. Coverage then reads "complete", memory is replaced, and every
+ * candidate whose only support was the dropped source comes back `NEW` the run after.
+ *
+ * **The rule.** Compare evidence bases, not attempt outcomes. Memory may be replaced
+ * only when this run's resolved sources are a superset of the sources the *stored* slugs
+ * rest on — i.e. we looked everywhere memory came from and more. Otherwise union, and
+ * union the source bases too, so the basis always describes the slugs actually held (a
+ * source that contributed three runs ago is still part of what memory rests on). This is
+ * strictly stronger than the old gate *and* strictly easier to satisfy in practice:
+ * `fullCoverage` needs all 20 competitors to resolve and essentially never fires, while
+ * "no regression in coverage" fires on any two consecutive runs that read the same nine.
+ * That is what makes the removal property real rather than aspirational: a candidate a
+ * competitor genuinely dropped falls out of memory on the next run that covers
+ * everything memory was built from.
+ *
+ * `inputsChanged` (see `inputFingerprint`) forces a union — the caller also reports that
+ * run as a baseline, so no `NEW` is displayed — but resets the source basis to this
+ * run's, because the previous configuration's sources are not coming back and leaving
+ * them in the basis would freeze memory forever.
  */
-export function mergePreviousSlugs(
-    previousSlugs: string[],
-    currentSlugs: string[],
-    fullCoverage: boolean,
-): string[] {
-    if (fullCoverage) return currentSlugs;
-    return [...new Set([...previousSlugs, ...currentSlugs])];
+export function mergeMemory(
+    previous: Memory,
+    current: Memory,
+    inputsChanged: boolean,
+): { memory: Memory; replaced: boolean } {
+    const union = (a: string[], b: string[]): string[] => [...new Set([...a, ...b])];
+
+    if (inputsChanged) {
+        return {
+            memory: { slugs: union(previous.slugs, current.slugs), sources: current.sources },
+            replaced: false,
+        };
+    }
+    const covered = new Set(current.sources);
+    if (previous.sources.every((s) => covered.has(s))) return { memory: current, replaced: true };
+    return {
+        memory: {
+            slugs: union(previous.slugs, current.slugs),
+            sources: union(previous.sources, current.sources),
+        },
+        replaced: false,
+    };
 }
 
 /**

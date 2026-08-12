@@ -1,20 +1,24 @@
 import { log } from 'apify';
 
 import type { describeCandidates, extractCompetitors, extractNames, isListPage } from './llm.js';
-import type { Candidate, ListKind, SourceList } from './pure.js';
+import type { Candidate, ListKind, Memory, SourceList } from './pure.js';
 import {
-    computeGaps,
     DEFAULT_DIRECTORIES,
     diffAgainstPrevious,
+    inputFingerprint,
     mapLimit,
-    mergePreviousSlugs,
+    mergeMemory,
     partitionResolved,
+    rankCandidates,
+    sourceName,
 } from './pure.js';
 import type {
     loadPrevious,
+    readCompetitors,
     readListPageVerdict,
     readNames,
     savePrevious,
+    writeCompetitors,
     writeListPageVerdict,
     writeNames,
 } from './store.js';
@@ -41,9 +45,16 @@ export interface OutputRow extends Candidate {
 export interface RunSummary {
     rows: OutputRow[];
     freshSources: number;
+    /**
+     * Whether every source this run *attempted* resolved. Observability only — a reader
+     * seeing `false` knows the run was partially blind. It is no longer what decides
+     * whether memory is replaced; see `mergeMemory` in `pure.ts`.
+     */
     fullCoverage: boolean;
     isBaseline: boolean;
     totalRanked: number;
+    /** True when memory superseded the stored one rather than being unioned into it. */
+    memoryReplaced: boolean;
 }
 
 /**
@@ -69,6 +80,8 @@ export interface Deps {
     describeCandidates: typeof describeCandidates;
     readNames: typeof readNames;
     writeNames: typeof writeNames;
+    readCompetitors: typeof readCompetitors;
+    writeCompetitors: typeof writeCompetitors;
     readListPageVerdict: typeof readListPageVerdict;
     writeListPageVerdict: typeof writeListPageVerdict;
     loadPrevious: typeof loadPrevious;
@@ -101,6 +114,11 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     /** Charges are accumulated and applied only after the dataset is pushed. */
     let freshSources = 0;
     const runDate = new Date().toISOString().slice(0, 10);
+
+    // Identifies *what this run looks at*. Memory gathered under a different fingerprint
+    // describes a different question and must not be diffed against — see
+    // `inputFingerprint` and `mergeMemory` in pure.ts.
+    const fingerprint = inputFingerprint({ companyDomain, maxCompetitors, directories });
 
     log.info('Starting', { companyDomain, maxCompetitors, minSources, directories: directories.length });
 
@@ -161,11 +179,27 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
                 'do not publish one; there is nothing to compare against.',
         );
     }
-    const competitors = (await deps.extractCompetitors(alt.hit))
-        .filter((c) => c.domain !== companyDomain)
+    // Cached against the alternatives page record, like every other extraction. Without
+    // this an LLM re-derived the competitor set from a marketing page on every run, so
+    // the source set the entire diff rests on was re-rolled each time — see
+    // `readCompetitors` in store.ts.
+    const cachedCompetitors = await deps.readCompetitors(alt.key);
+    const extracted = cachedCompetitors ?? (await deps.extractCompetitors(alt.hit));
+    if (!cachedCompetitors && extracted.length > 0) await deps.writeCompetitors(alt.key, extracted);
+
+    const competitors = extracted
+        // `sourceName` on both sides: `www.apify.com` on apify.com's own alternatives
+        // page is the company itself, not a competitor to compare it against.
+        .filter((c) => sourceName(c.domain) !== sourceName(companyDomain))
+        // Sorted before the cut, so the selection depends on the *set* the model returned
+        // and not on the order it happened to return it in. `.slice` on raw model output
+        // is the same rank-cutoff bug already fixed one layer down for `MAX_ROWS`: a mere
+        // reordering swapped which competitors were read, and a competitor that silently
+        // left the set took its candidates out of the run's evidence with it.
+        .sort((a, b) => sourceName(a.domain).localeCompare(sourceName(b.domain)))
         .slice(0, maxCompetitors);
     if (competitors.length === 0) throw new Error(`No usable competitors extracted from ${alt.hit.url}`);
-    log.info('Competitors', { count: competitors.length });
+    log.info('Competitors', { count: competitors.length, fromCache: cachedCompetitors !== null });
 
     // 2. What the company already has. Without this the whole diff is meaningless,
     //    so a failure here is fatal rather than degraded.
@@ -184,17 +218,40 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     //    across two consecutive runs).
     const tierBySource = new Map<string, 'path' | 'search'>();
 
+    // Peer and directory names live in ONE namespace (`sourceName`), so a domain that is
+    // both a competitor and a directory must not be read twice — `zapier.com` in both
+    // roles used to yield `peerCount 1 + directoryCount 1 = 2` from a single page of
+    // names, clearing the default `minSources: 2` on its own, and its directory pass
+    // overwrote the peer's `'search'` tier in `tierBySource`, clearing `weakEvidence`.
+    // The peer wins: `peerCount` is the primary ranking key and the competitor set is
+    // what the user actually asked about. Dropping the duplicate here rather than
+    // deduping afterwards also saves the fetch.
+    const peerNames = new Set(competitors.map((c) => sourceName(c.domain)));
+    const effectiveDirectories = directories.filter((url) => {
+        const name = sourceName(url);
+        if (name === sourceName(companyDomain)) {
+            log.info('Skipping directory — it is the company being analyzed', { url });
+            return false;
+        }
+        if (peerNames.has(name)) {
+            log.info('Skipping directory — already read as a competitor', { url });
+            return false;
+        }
+        return true;
+    });
+
     const peerResults = await mapLimit(competitors, CONCURRENCY, async (competitor) => {
         const resolved = await confirmed(await deps.findList(competitor.domain, 'integrations'), 'integrations');
         if (!resolved.hit) return null;
         const names = await namesFor(resolved);
         if (names.length === 0) return null;
         if (!resolved.fromCache) freshSources += 1;
-        if (resolved.tier) tierBySource.set(competitor.domain, resolved.tier);
-        return { name: competitor.domain, kind: 'peer' as const, names };
+        const name = sourceName(competitor.domain);
+        if (resolved.tier) tierBySource.set(name, resolved.tier);
+        return { name, kind: 'peer' as const, names };
     });
 
-    const dirResults = await mapLimit(directories, CONCURRENCY, async (url) => {
+    const dirResults = await mapLimit(effectiveDirectories, CONCURRENCY, async (url) => {
         // fetchUrl only ever tries the path tier (see Resolved.tier's doc comment in
         // web.ts), so a fixed directory URL never needs the search-tier gate.
         const resolved = await deps.fetchUrl(url);
@@ -202,15 +259,14 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
         const names = await namesFor(resolved);
         if (names.length === 0) return null;
         if (!resolved.fromCache) freshSources += 1;
-        const name = new URL(url).hostname;
+        const name = sourceName(url);
         tierBySource.set(name, 'path');
         return { name, kind: 'directory' as const, names };
     });
 
-    // `fullCoverage` is the input to the carry-forward rule below: whether *every*
-    // competitor and directory resolved to a usable list this run. A single miss — a
-    // thrown fetch, search flakiness, or the isListPage gate rejecting a bad hit — means
-    // this run's candidate list is incomplete evidence, not proof that anything vanished.
+    // Whether *every* source this run attempted resolved to a usable list. Reported and
+    // logged so a reader can see how blind the run was; it is NOT what decides whether
+    // memory is replaced — the evidence-base comparison in `mergeMemory` is.
     const peers = partitionResolved(peerResults);
     const dirs = partitionResolved(dirResults);
     const fullCoverage = peers.fullCoverage && dirs.fullCoverage;
@@ -229,38 +285,60 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
         });
     }
 
-    // 4. The diff — plain code, no model involved. `fullGaps` is the complete ranked
-    //    pool; `gaps` is what actually gets described and shown. Fix round 1 (critical):
-    //    memory (`currentSlugs`, below) MUST be computed from `fullGaps`, not `gaps`.
-    //    A candidate ranked #101 whose source resolved perfectly is still real evidence
-    //    of "no change" — truncating it out of memory as well as out of the display
-    //    reproduces the exact bug requirement 2 exists to prevent, just triggered by
-    //    rank jitter around the cutoff instead of source failure: it would vanish from
-    //    memory on a fullCoverage run, then read as spurious NEW the moment ordinary
-    //    reordering pushed it back into the top MAX_ROWS. What we remember and what we
-    //    display are two different things.
-    const fullGaps = computeGaps(mine, sources, minSources);
+    // 4. The diff — plain code, no model involved. Three pools, and keeping them apart
+    //    is the whole discipline: what we REMEMBER, what we RANK for display, and what we
+    //    actually SHOW.
+    //
+    //    `ranked` is every candidate with any evidence at all. It is what goes into
+    //    memory, because both narrowing steps below are presentation choices:
+    //      - `minSources` is a noise knob the README tells users to turn. Filtering
+    //        before memory means raising it to 3 and back to 2 makes every 2-source
+    //        candidate return as fabricated NEW — the documented workflow producing the
+    //        exact defect this Actor exists to avoid. It also means ordinary extraction
+    //        jitter (a 2-source candidate whose second source omits it this run) erases
+    //        the candidate from memory rather than merely hiding it.
+    //      - `MAX_ROWS` is a display cap. A candidate ranked #101 whose source resolved
+    //        perfectly is still real evidence of "no change"; truncating it out of memory
+    //        makes rank jitter around the cutoff read as NEW.
+    //    Same principle both times: what we remember and what we display are two
+    //    different things.
+    const ranked = rankCandidates(mine, sources);
+    const fullGaps = ranked.filter((c) => c.peerCount + c.directoryCount >= minSources);
     const gaps = fullGaps.slice(0, MAX_ROWS);
-    log.info('Candidates', { count: gaps.length, totalRanked: fullGaps.length });
+    log.info('Candidates', { count: gaps.length, aboveThreshold: fullGaps.length, totalRanked: ranked.length });
 
-    // 5. Describe and tag against the previous run. `currentSlugs` comes from the full
-    //    pool (see above), so `tags` covers every candidate that has real evidence this
-    //    run, not just the ones that made the display cut.
+    // 5. Describe and tag against the previous run.
     const described = await deps.describeCandidates(gaps);
-    const previous = await deps.loadPrevious(companyDomain);
-    const currentSlugs = fullGaps.map((g) => g.slug);
-    const tags = diffAgainstPrevious(previous, currentSlugs);
-    const isBaseline = previous.length === 0;
+    const stored = await deps.loadPrevious(companyDomain);
+    const previous: Memory = { slugs: stored?.slugs ?? [], sources: stored?.sources ?? [] };
+    const current: Memory = { slugs: ranked.map((c) => c.slug), sources: sources.map((s) => s.name) };
+
+    // A stored record whose fingerprint does not match this run's was gathered under
+    // different conditions — a different competitor cap, a different directory list, or
+    // (for a record written before fingerprints existed) conditions we simply cannot
+    // know. Diffing against it would report the change in the *question* as change in
+    // the *world*. Report a baseline instead, and say so.
+    const inputsChanged = stored !== null && stored.fingerprint !== fingerprint;
+    if (inputsChanged) {
+        log.warning('Inputs changed since the last run — reporting a baseline, not a diff', {
+            previousFingerprint: stored.fingerprint,
+            fingerprint,
+        });
+    }
+
+    const tags = diffAgainstPrevious(previous.slugs, current.slugs);
+    const isBaseline = stored === null || previous.slugs.length === 0 || inputsChanged;
 
     const rows: OutputRow[] = gaps.map((gap) => ({
         ...gap,
         description: described.get(gap.slug)?.description ?? '',
         category: described.get(gap.slug)?.category ?? 'unknown',
-        // On a first run everything is trivially new. Saying NEW would imply a competitor
-        // just added it, which is not what happened.
-        // `gap` is drawn from `gaps`, a slice of `fullGaps`, and `tags` was built from
-        // every slug in `fullGaps` — so `gap.slug` is always a key in `tags` and the
-        // non-null assertion is safe, not a hopeful one.
+        // On a first run — or the first run after the inputs changed — everything is
+        // trivially new. Saying NEW would imply a competitor just added it, which is not
+        // what happened.
+        // `gap` is drawn from `gaps`, a slice of a filter of `ranked`, and `tags` was
+        // built from every slug in `ranked` — so `gap.slug` is always a key in `tags`
+        // and the non-null assertion is safe, not a hopeful one.
         status: isBaseline ? 'BASELINE' : tags.get(gap.slug)!,
         weakEvidence: gap.carriedBy.some((name) => tierBySource.get(name) === 'search'),
     }));
@@ -269,15 +347,21 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     //    for a run that produced nothing.
     if (rows.length > 0) await deps.pushData(rows);
 
-    // Carry-forward rule: never let a source (or a rank cutoff) that merely failed to
-    // resolve/place this run read as "its integrations disappeared." When coverage is
-    // incomplete, previously-known slugs are unioned into memory rather than replaced,
-    // so a source that flakes out for one run and comes back does not get re-tagged
-    // NEW. See mergePreviousSlugs in pure.ts.
-    await deps.savePrevious(companyDomain, mergePreviousSlugs(previous, currentSlugs, fullCoverage), runDate);
+    // Carry-forward rule: never let a source that merely failed to resolve this run —
+    // or one this run never attempted — read as "its integrations disappeared." Memory
+    // is superseded only when this run's evidence base covers everything the stored
+    // memory rests on; otherwise it is unioned in. See mergeMemory in pure.ts.
+    const { memory, replaced: memoryReplaced } = mergeMemory(previous, current, inputsChanged);
+    log.info('Memory', {
+        stored: memory.slugs.length,
+        thisRun: current.slugs.length,
+        replaced: memoryReplaced,
+        sources: memory.sources.length,
+    });
+    await deps.savePrevious(companyDomain, { ...memory, fingerprint }, runDate);
 
     if (freshSources > 0) await deps.charge({ eventName: 'source-analyzed', count: freshSources });
     if (rows.length > 0) await deps.charge({ eventName: 'candidate-found', count: rows.length });
 
-    return { rows, freshSources, fullCoverage, isBaseline, totalRanked: fullGaps.length };
+    return { rows, freshSources, fullCoverage, isBaseline, totalRanked: fullGaps.length, memoryReplaced };
 }
