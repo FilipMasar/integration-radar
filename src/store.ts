@@ -189,21 +189,8 @@ export async function writeNames(key: string, names: string[]): Promise<void> {
     if (record) await kv.setValue(key, { ...record, names });
 }
 
-/** The only two reasons either call site actually produces today — see writeMiss's callers. */
-type MissReason = 'thin' | 'no-match';
-
 interface MissRecord {
     missedAt: string;
-    /**
-     * Optional, purely for observability today — the caller never branches on it, a
-     * miss is a miss regardless of reason. Pinned to the closed union rather than an
-     * open `string` so a third call site adding a new reason has to update this type
-     * (and everywhere that matches on it) rather than silently type-checking a typo.
-     * A future fetch layer that can see the actual HTTP status (a 404 vs. a 200 with
-     * no body are different facts, both currently invisible to us behind
-     * rag-web-browser) can extend this union with a new member when that need is real.
-     */
-    reason?: MissReason;
 }
 
 function missKey(key: string): string {
@@ -230,13 +217,13 @@ export async function readMiss(key: string): Promise<boolean> {
     if (isExpired(record.missedAt, ttlHours(process.env.MISS_TTL_HOURS, DEFAULT_MISS_TTL_HOURS))) {
         return false;
     }
-    log.info('Known miss', { key, reason: record.reason });
+    log.info('Known miss', { key });
     return true;
 }
 
-export async function writeMiss(key: string, reason?: MissReason): Promise<void> {
+export async function writeMiss(key: string): Promise<void> {
     const kv = await getStore();
-    await kv.setValue(missKey(key), { missedAt: new Date().toISOString(), reason } satisfies MissRecord);
+    await kv.setValue(missKey(key), { missedAt: new Date().toISOString() } satisfies MissRecord);
 }
 
 /**

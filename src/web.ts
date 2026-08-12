@@ -132,7 +132,7 @@ export async function fetchUrl(url: string): Promise<Resolved> {
             log.warning('Fetch error', { url, render, error: (err as Error).message });
         }
     }
-    if (finalAttemptCompleted) await writeMiss(key, 'thin');
+    if (finalAttemptCompleted) await writeMiss(key);
     return { hit: null, fromCache: false, key, tier: 'path' };
 }
 
@@ -199,6 +199,6 @@ export async function findList(domain: string, kind: ListKind): Promise<Resolved
     }
 
     log.warning('No list found', { domain, kind });
-    if (searchCompleted) await writeMiss(key, 'no-match');
+    if (searchCompleted) await writeMiss(key);
     return { hit: null, fromCache: false, key, tier: null };
 }

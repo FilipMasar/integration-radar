@@ -56,7 +56,7 @@ vi.mock('../src/store.js', async (importOriginal) => {
         readCache: (...args: [string]) => mockReadCache(...args),
         writeCache: (...args: [string, unknown]) => mockWriteCache(...args),
         readMiss: (...args: [string]) => mockReadMiss(...args),
-        writeMiss: (...args: [string, ('thin' | 'no-match')?]) => mockWriteMiss(...args),
+        writeMiss: (...args: [string]) => mockWriteMiss(...args),
     };
 });
 
@@ -116,7 +116,7 @@ describe('fetchUrl miss recording', () => {
 
         expect(result.hit).toBeNull();
         expect(mockWriteMiss).toHaveBeenCalledTimes(1);
-        expect(mockWriteMiss).toHaveBeenCalledWith(expect.stringContaining('page-'), 'thin');
+        expect(mockWriteMiss).toHaveBeenCalledWith(expect.stringContaining('page-'));
     });
 
     it('does NOT write a miss when the raw fetch throws and the render retry also throws', async () => {
@@ -127,18 +127,15 @@ describe('fetchUrl miss recording', () => {
         expect(mockWriteMiss).not.toHaveBeenCalled();
     });
 
-    it('writes a thin-tagged miss when raw-http throws but the render retry completes thin', async () => {
+    it('writes a miss when raw-http throws but the render retry completes thin', async () => {
         // The render attempt is the final, most capable one and it DID complete — this
-        // is legitimate evidence, unlike the mirror ordering below. Asserting the call's
-        // actual content (not just its count) is what makes this test able to fail: a
-        // count-only assertion can't tell "writeMiss(key)" (the pre-round-2 bug) apart
-        // from "writeMiss(key, 'thin')" (the current, correct call).
+        // is legitimate evidence, unlike the mirror ordering below.
         outcomes = [{ throws: new Error('network blip') }, { items: [{ markdown: 'still thin' }] }];
 
         await fetchUrl('https://example.com/integrations');
 
         expect(mockWriteMiss).toHaveBeenCalledTimes(1);
-        expect(mockWriteMiss).toHaveBeenCalledWith(expect.stringContaining('page-'), 'thin');
+        expect(mockWriteMiss).toHaveBeenCalledWith(expect.stringContaining('page-'));
     });
 
     it('does NOT write a miss when raw-http completes thin but the render retry throws', async () => {
@@ -187,7 +184,7 @@ describe('findList miss recording', () => {
         const result = await findList('example.com', 'integrations');
 
         expect(result.hit).toBeNull();
-        expect(missCallsFor('search-')).toEqual([[expect.stringContaining('search-'), 'no-match']]);
+        expect(missCallsFor('search-')).toEqual([[expect.stringContaining('search-')]]);
     });
 });
 

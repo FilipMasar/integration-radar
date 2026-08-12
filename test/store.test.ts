@@ -244,7 +244,7 @@ describe('readMiss / writeMiss', () => {
     });
 
     it('round-trips a miss under its own key, never inside the page record', async () => {
-        await writeMiss('key', 'thin');
+        await writeMiss('key');
         expect(await readMiss('key')).toBe(true);
         // An earlier draft cached a falsy value inside the page record; `[]` is truthy in
         // JS, so it read back as a page *hit* and disabled the tier for that domain.
