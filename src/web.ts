@@ -1,7 +1,7 @@
 import { Actor, log } from 'apify';
 
-import type { ListKind, PageHit } from './pure.js';
-import { PATHS } from './pure.js';
+import type { PageHit } from './pure.js';
+import { INTEGRATIONS_PATH } from './pure.js';
 import { cacheKey, readCache, readMiss, writeCache, writeMiss } from './store.js';
 
 const RAG_WEB_BROWSER = 'apify/rag-web-browser';
@@ -34,7 +34,7 @@ export interface Resolved {
      *     rather than reported with the same confidence.
      *
      * **`tier` describes which mechanism ran, not whether it succeeded — always check
-     * `hit !== null` first.** `findList` returns `null` when nothing resolved, but
+     * `hit !== null` first.** `findIntegrations` returns `null` when nothing resolved, but
      * `fetchUrl` returns `'path'` even on its give-up path, because the path tier is the
      * only mechanism it has. Reading `tier` alone as a success signal is wrong.
      */
@@ -92,7 +92,7 @@ export async function fetchUrl(url: string): Promise<Resolved> {
     }
 
     // Skip straight past a domain that failed both engines recently — this also
-    // covers Task 6's fixed directory URLs, not just findList's own callers.
+    // covers Task 6's fixed directory URLs, not just findIntegrations' own callers.
     if (await readMiss(key)) {
         return { hit: null, fromCache: true, key, tier: 'path' };
     }
@@ -141,10 +141,10 @@ export const ARTICLE_RE = /\/(blog|news|post|posts|article|guides?|changelog|doc
 
 /**
  * Whether a fetched page is actually the list it claims to be, not a homepage, an
- * article that happens to mention the keyword, or a thin shell. Requiring the keyword
- * for BOTH `kind`s is what rejects a homepage served from `/integrations/` —
- * ScraperAPI does exactly this. Exported (and taking `keyword` as a plain argument
- * rather than closing over `kind`) so it's unit-testable on its own.
+ * article that happens to mention the keyword, or a thin shell. Requiring the keyword at
+ * all is what rejects a homepage served from `/integrations/` — ScraperAPI does exactly
+ * this. Exported, and taking `keyword` as a plain argument rather than reading it from
+ * the caller's scope, so it's unit-testable on its own.
  */
 export function looksRight(hit: PageHit | null, keyword: string): hit is PageHit {
     return !isThin(hit) && hit!.markdown.toLowerCase().includes(keyword) && !ARTICLE_RE.test(hit!.url);
@@ -158,9 +158,11 @@ export function looksRight(hit: PageHit | null, keyword: string): hit is PageHit
  * on ~1 domain in 7), as was a five-path guess list (a failed fetch costs the same as a
  * successful one, so five guesses cost more than the search they were avoiding).
  */
-export async function findList(domain: string, kind: ListKind): Promise<Resolved> {
-    const keyword = kind === 'alternatives' ? 'alternativ' : 'integrat';
-    const key = cacheKey('search', `${domain}-${kind}`);
+export async function findIntegrations(domain: string): Promise<Resolved> {
+    const keyword = 'integrat';
+    // Unchanged key format: `search-{domain}-integrations`. Existing stored records for
+    // this domain must keep hitting, so this string is not a free choice.
+    const key = cacheKey('search', `${domain}-integrations`);
 
     // Checked before the path guess even runs, so a domain already known to have
     // neither a guessable page nor a findable one via search costs zero child calls
@@ -169,9 +171,9 @@ export async function findList(domain: string, kind: ListKind): Promise<Resolved
         return { hit: null, fromCache: true, key, tier: null };
     }
 
-    const guess = await fetchUrl(`https://${domain}${PATHS[kind]}`);
+    const guess = await fetchUrl(`https://${domain}${INTEGRATIONS_PATH}`);
     if (looksRight(guess.hit, keyword)) {
-        log.info('Resolved via path', { domain, kind, url: guess.hit.url });
+        log.info('Resolved via path', { domain, url: guess.hit.url });
         return guess; // already tier: 'path', set by fetchUrl
     }
 
@@ -184,21 +186,21 @@ export async function findList(domain: string, kind: ListKind): Promise<Resolved
     let searchCompleted = false;
     try {
         // Two results, not one: the top hit is sometimes an article rather than the list.
-        const items = await runRagBrowser(`site:${domain} ${kind}`, false, 2);
+        const items = await runRagBrowser(`site:${domain} integrations`, false, 2);
         searchCompleted = true;
         for (const item of items) {
             const hit = toPageHit(item, `https://${domain}`);
             if (looksRight(hit, keyword)) {
-                log.info('Resolved via search', { domain, kind, url: hit.url });
+                log.info('Resolved via search', { domain, url: hit.url });
                 await writeCache(key, hit);
                 return { hit, fromCache: false, key, tier: 'search' };
             }
         }
     } catch (err) {
-        log.warning('Search error', { domain, kind, error: (err as Error).message });
+        log.warning('Search error', { domain, error: (err as Error).message });
     }
 
-    log.warning('No list found', { domain, kind });
+    log.warning('No list found', { domain });
     if (searchCompleted) await writeMiss(key);
     return { hit: null, fromCache: false, key, tier: null };
 }

@@ -15,7 +15,7 @@ import type { PageHit, RawCandidate } from '../src/pure.js';
  *
  * This only fakes the network boundary (the OpenAI SDK). Everything downstream of the
  * mocked response — stripFences, JSON.parse, zod validation, the retry loop, the
- * domain-cleaning/dedup logic in extractCompetitors, the fail-open behaviour of
+ * domain-cleaning/dedup logic in seedCompetitors, the fail-open behaviour of
  * isListPage, the prompt-building in isListPage/describeCandidates — is the real code
  * in src/llm.ts, unmocked. `apify`'s `log` is stubbed only because these tests run
  * without `Actor.init()`.
@@ -32,10 +32,10 @@ vi.mock('apify', () => ({
     log: { info: vi.fn(), warning: vi.fn() },
 }));
 
-const { describeCandidates, extractCompetitors, extractNames, isListPage, sanitizeCandidateName, seedCompetitors, stripFences } =
+const { describeCandidates, extractNames, isListPage, sanitizeCandidateName, seedCompetitors, stripFences } =
     await import('../src/llm.js');
 
-function page(markdown: string, url = 'https://example.com/alternatives'): PageHit {
+function page(markdown: string, url = 'https://example.com/integrations'): PageHit {
     return { url, markdown };
 }
 
@@ -71,62 +71,32 @@ describe('stripFences', () => {
     });
 });
 
-describe('extractCompetitors', () => {
-    it('parses a fenced response, normalizes a domain with a scheme and path, and keeps a confident guess', async () => {
+describe('seedCompetitors', () => {
+    it('returns cleaned competitors from the model', async () => {
         mockCreate.mockResolvedValueOnce(
-            json(
-                '```json\n' +
-                    JSON.stringify({
-                        competitors: [{ name: 'Jina AI', domain: 'https://jina.ai/pricing' }],
-                    }) +
-                    '\n```',
-            ),
+            json(JSON.stringify({ competitors: [{ name: 'Rival', domain: 'https://www.rival.com/pricing' }] })),
         );
 
-        const result = await extractCompetitors(page('...'));
-
-        expect(result).toEqual([{ name: 'Jina AI', domain: 'jina.ai' }]);
+        expect(await seedCompetitors('mine.com', 20)).toEqual([{ name: 'Rival', domain: 'rival.com' }]);
     });
 
-    it('drops an entry with an empty domain rather than deriving one', async () => {
+    it('parses a fenced response', async () => {
         mockCreate.mockResolvedValueOnce(
-            json(JSON.stringify({ competitors: [{ name: 'Import.io', domain: '' }] })),
+            json(`\`\`\`json\n${JSON.stringify({ competitors: [{ name: 'Jina AI', domain: 'jina.ai' }] })}\n\`\`\``),
         );
 
-        expect(await extractCompetitors(page('...'))).toEqual([]);
+        expect(await seedCompetitors('mine.com', 20)).toEqual([{ name: 'Jina AI', domain: 'jina.ai' }]);
     });
 
-    it('drops an entry whose domain does not look like a domain', async () => {
-        mockCreate.mockResolvedValueOnce(
-            json(JSON.stringify({ competitors: [{ name: 'Bad', domain: 'not a domain' }] })),
-        );
-
-        expect(await extractCompetitors(page('...'))).toEqual([]);
-    });
-
-    it('deduplicates entries that share a domain', async () => {
-        mockCreate.mockResolvedValueOnce(
-            json(
-                JSON.stringify({
-                    competitors: [
-                        { name: 'Make', domain: 'make.com' },
-                        { name: 'Make.com', domain: 'make.com' },
-                    ],
-                }),
-            ),
-        );
-
-        const result = await extractCompetitors(page('...'));
-
-        expect(result).toHaveLength(1);
-        expect(result[0].domain).toBe('make.com');
-    });
-
+    // The three below exercise `completeJson`, which every LLM call in this file shares.
+    // They lived on `extractCompetitors` until it was deleted with the alternatives page;
+    // nothing else covers the parse-failure retry branch (distinct from the thrown-error
+    // one) or the request parameters, so they moved here rather than going away.
     it('retries once on an unparseable response and returns the second attempt', async () => {
         mockCreate.mockResolvedValueOnce(json('not json at all'));
         mockCreate.mockResolvedValueOnce(json(JSON.stringify({ competitors: [{ name: 'Weaviate', domain: 'weaviate.io' }] })));
 
-        const result = await extractCompetitors(page('...'));
+        const result = await seedCompetitors('mine.com', 20);
 
         expect(mockCreate).toHaveBeenCalledTimes(2);
         expect(result).toEqual([{ name: 'Weaviate', domain: 'weaviate.io' }]);
@@ -136,39 +106,22 @@ describe('extractCompetitors', () => {
         mockCreate.mockResolvedValueOnce(json(JSON.stringify({ competitors: 'not-an-array' })));
         mockCreate.mockResolvedValueOnce(json(JSON.stringify({ competitors: [{ name: 'Weaviate', domain: 'weaviate.io' }] })));
 
-        const result = await extractCompetitors(page('...'));
+        const result = await seedCompetitors('mine.com', 20);
 
         expect(mockCreate).toHaveBeenCalledTimes(2);
         expect(result).toEqual([{ name: 'Weaviate', domain: 'weaviate.io' }]);
     });
 
-    it('gives up and returns [] after two failed attempts, never a partial guess', async () => {
-        mockCreate.mockResolvedValue(json('not json'));
-
-        const result = await extractCompetitors(page('...'));
-
-        expect(mockCreate).toHaveBeenCalledTimes(2);
-        expect(result).toEqual([]);
-    });
-
     it('calls the model with temperature 0 and json_object response format', async () => {
+        // Without temperature 0 the whole NEW/SEEN diff measures sampling noise rather
+        // than change, and nothing else in the suite pins it.
         mockCreate.mockResolvedValueOnce(json(JSON.stringify({ competitors: [] })));
 
-        await extractCompetitors(page('...'));
+        await seedCompetitors('mine.com', 20);
 
         const args = mockCreate.mock.calls[0][0];
         expect(args.temperature).toBe(0);
         expect(args.response_format).toEqual({ type: 'json_object' });
-    });
-});
-
-describe('seedCompetitors', () => {
-    it('returns cleaned competitors from the model', async () => {
-        mockCreate.mockResolvedValueOnce(
-            json(JSON.stringify({ competitors: [{ name: 'Rival', domain: 'https://www.rival.com/pricing' }] })),
-        );
-
-        expect(await seedCompetitors('mine.com', 20)).toEqual([{ name: 'Rival', domain: 'rival.com' }]);
     });
 
     it('asks for the requested number and names the domain in the prompt', async () => {
@@ -211,19 +164,19 @@ describe('isListPage', () => {
     it('returns false when the model judges the page not to be a list', async () => {
         mockCreate.mockResolvedValueOnce(json(JSON.stringify({ isList: false, reason: 'product marketing page' })));
 
-        expect(await isListPage(page('...'), 'integrations')).toBe(false);
+        expect(await isListPage(page('...'))).toBe(false);
     });
 
     it('returns true when the model judges the page to be a list', async () => {
         mockCreate.mockResolvedValueOnce(json(JSON.stringify({ isList: true, reason: 'enumerates integrations' })));
 
-        expect(await isListPage(page('...'), 'integrations')).toBe(true);
+        expect(await isListPage(page('...'))).toBe(true);
     });
 
     it('fails OPEN on an LLM error: a wrongly-kept page beats a silent false negative', async () => {
         mockCreate.mockRejectedValue(new Error('rate limited'));
 
-        const result = await isListPage(page('...'), 'alternatives');
+        const result = await isListPage(page('...'));
 
         // Failing open must come from completeJson genuinely giving up (both
         // attempts exhausted), not from isListPage short-circuiting on the first
@@ -233,28 +186,16 @@ describe('isListPage', () => {
         expect(result).toBe(true);
     });
 
-    // Nothing above inspects the actual prompt text, so a swapped `kind === 'alternatives'
-    // ? ... : ...` ternary in src/llm.ts (asking about integrations when kind is
-    // 'alternatives', and vice versa) would pass every test above unchanged — the mocked
-    // response drives the assertion, not the request. These two pin the request itself.
-    it('asks about competitors/alternatives, not integrations, when kind is "alternatives"', async () => {
+    // Nothing above inspects the actual prompt text — the mocked response drives those
+    // assertions, not the request — so this one pins the question actually asked. It used
+    // to be a pair, guarding a `kind` ternary that asked about alternatives instead; the
+    // ternary is gone with the alternatives page, the need to pin the request is not.
+    it('asks whether the page enumerates third-party integrations', async () => {
         mockCreate.mockResolvedValueOnce(json(JSON.stringify({ isList: true, reason: 'x' })));
 
-        await isListPage(page('...'), 'alternatives');
+        await isListPage(page('...'));
 
-        const sent = sentPrompt();
-        expect(sent).toContain('a list of competing or alternative products');
-        expect(sent).not.toContain('third-party integrations, apps or connectors');
-    });
-
-    it('asks about integrations/connectors, not alternatives, when kind is "integrations"', async () => {
-        mockCreate.mockResolvedValueOnce(json(JSON.stringify({ isList: true, reason: 'x' })));
-
-        await isListPage(page('...'), 'integrations');
-
-        const sent = sentPrompt();
-        expect(sent).toContain('a list of third-party integrations, apps or connectors');
-        expect(sent).not.toContain('competing or alternative products');
+        expect(sentPrompt()).toContain('a list of third-party integrations, apps or connectors');
     });
 });
 
@@ -299,8 +240,8 @@ describe('describeCandidates', () => {
     });
 
     describe('candidate-name sanitization (prompt-injection boundary)', () => {
-        // Names reaching this function came from extractNames/extractCompetitors —
-        // themselves LLM output from a scraped, possibly hostile third-party page — so a
+        // Names reaching this function came from extractNames — itself LLM output from a
+        // scraped, possibly hostile third-party page — so a
         // name containing instruction-shaped text or embedded newlines is the ordinary
         // threat model here, not an exotic one.
         it('strips control characters and newlines rather than passing them through', () => {

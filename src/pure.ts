@@ -1,6 +1,5 @@
 // ---------- types ----------
 
-export type ListKind = 'alternatives' | 'integrations';
 export type SourceKind = 'peer' | 'directory';
 
 export interface Company {
@@ -92,17 +91,15 @@ export const DEFAULT_DIRECTORIES: string[] = [
 ];
 
 /**
- * One guess per kind, then search. A longer path list was tried and cut: a failed
- * fetch costs the same as a successful one, so five guesses cost ~$0.075 before the
- * search even starts, while a single-result `site:` search costs ~$0.015 and finds
- * every variant (Bright Data's `/integration`, Oxylabs' `/resources/integrations`,
- * docs subdomains). The one guess stays because it is deterministic — the same URL
- * every run is what keeps NEW/SEEN honest; search results can shift between runs.
+ * The one path guessed before falling back to a site-scoped search. A longer guess list
+ * was tried and cut: a failed fetch costs the same as a successful one, so five guesses
+ * cost ~$0.075 before the search even starts, while a single-result `site:` search costs
+ * ~$0.015 and finds every variant (Bright Data's `/integration`, Oxylabs'
+ * `/resources/integrations`, docs subdomains). The one guess stays because it is
+ * deterministic — the same URL every run is what keeps NEW/SEEN honest; search results
+ * can shift between runs.
  */
-export const PATHS: Record<ListKind, string> = {
-    alternatives: '/alternatives',
-    integrations: '/integrations',
-};
+export const INTEGRATIONS_PATH = '/integrations';
 
 /**
  * Generic capabilities that appear on every vendor's page and are never a useful
@@ -310,10 +307,11 @@ export function diffAgainstPrevious(
  * `fullCoverage`, has since been removed; the argument is why.) It certified that every source
  * *attempted this run* resolved. It said nothing about whether this run attempted the
  * same sources as last run. A competitor dropped before the resolution loop even starts
- * — by `extractCompetitors` nondeterminism, by a `maxCompetitors` cut, or by the user
- * passing a different `directories` list — never becomes an unresolved entry; the list
- * is simply shorter. Coverage then reads "complete", memory is replaced, and every
- * candidate whose only support was the dropped source comes back `NEW` the run after.
+ * — by a competitor set that changed between runs (a re-derived seed, or an edited
+ * `competitors` input), by a `maxCompetitors` cut, or by the user passing a different
+ * `directories` list — never becomes an unresolved entry; the list is simply shorter.
+ * Coverage then reads "complete", memory is replaced, and every candidate whose only
+ * support was the dropped source comes back `NEW` the run after.
  *
  * **The rule.** Compare evidence bases, not attempt outcomes. Memory may be replaced
  * only when this run's resolved sources are a superset of the sources the *stored* slugs
@@ -353,8 +351,8 @@ export function diffAgainstPrevious(
  *
  * 2. **It governs memory, not the tag.** `diffAgainstPrevious` reads `previous.slugs`
  *    whatever this function decides. So this stops run N's *loss* of memory from becoming
- *    run N+1's `NEW`; it does nothing about run N's *gain*. If `extractCompetitors`
- *    returns one competitor more than last run — at least as likely as one fewer — or a
+ *    run N+1's `NEW`; it does nothing about run N's *gain*. If the competitor set gains an
+ *    entry relative to last run — a re-derived seed, an edited `competitors` input — or a
  *    source that missed last run resolves this run, the basis has only grown, the
  *    superset test still passes, and every name only that new source carries is tagged
  *    `NEW`. Nothing changed in the world; we looked somewhere new. `weakEvidence` catches

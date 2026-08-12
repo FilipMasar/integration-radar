@@ -70,7 +70,7 @@ describe('looksRight', () => {
     });
 
     it('rejects a page that lacks the keyword', () => {
-        expect(looksRight(goodPage('integrat'), 'alternativ')).toBe(false);
+        expect(looksRight(goodPage('integrat'), 'connector')).toBe(false);
     });
 
     it('rejects an article-shaped URL even with the keyword and enough content', () => {

@@ -28,7 +28,6 @@ const {
     isExpired,
     loadPrevious,
     readCache,
-    readCompetitors,
     readListPageVerdict,
     readMiss,
     readNames,
@@ -36,7 +35,6 @@ const {
     savePrevious,
     ttlHours,
     writeCache,
-    writeCompetitors,
     writeListPageVerdict,
     writeMiss,
     writeNames,
@@ -205,36 +203,6 @@ describe('readNames / writeNames', () => {
     it('expires the names on the same TTL as the page they came from', async () => {
         kvData.set('stale', { fetchedAt: hoursAgo(25), hit: PAGE, names: ['Slack'] });
         expect(await readNames('stale')).toBeNull();
-    });
-});
-
-describe('readCompetitors / writeCompetitors', () => {
-    beforeEach(() => {
-        kvData.clear();
-        delete process.env.CACHE_TTL_HOURS;
-    });
-
-    it('round-trips a competitor set attached to the alternatives page record', async () => {
-        await writeCache('alt', PAGE);
-        await writeCompetitors('alt', [{ name: 'Rival', domain: 'rival.com' }]);
-        expect(await readCompetitors('alt')).toEqual([{ name: 'Rival', domain: 'rival.com' }]);
-    });
-
-    it('never attaches competitors to a page record that does not exist', async () => {
-        await writeCompetitors('orphan', [{ name: 'Rival', domain: 'rival.com' }]);
-        expect(await readCompetitors('orphan')).toBeNull();
-    });
-
-    it('reads an empty stored list as a miss, not a hit', async () => {
-        // `[]` is truthy in JS; treating it as a cache hit would permanently pin the run
-        // to "no competitors", which is fatal.
-        kvData.set('alt', { fetchedAt: hoursAgo(1), hit: PAGE, competitors: [] });
-        expect(await readCompetitors('alt')).toBeNull();
-    });
-
-    it('expires on the same TTL as the page it was extracted from', async () => {
-        kvData.set('alt', { fetchedAt: hoursAgo(25), hit: PAGE, competitors: [{ name: 'R', domain: 'r.com' }] });
-        expect(await readCompetitors('alt')).toBeNull();
     });
 });
 

@@ -1,27 +1,28 @@
 import { log } from 'apify';
 
-import type { describeCandidates, extractCompetitors, extractNames, isListPage } from './llm.js';
-import type { Candidate, ListKind, Memory, SourceList } from './pure.js';
+import type { describeCandidates, extractNames, isListPage, seedCompetitors } from './llm.js';
+import type { Candidate, Company, Memory, SourceList } from './pure.js';
 import {
     DEFAULT_DIRECTORIES,
     diffAgainstPrevious,
     inputFingerprint,
     mapLimit,
     mergeMemory,
+    normalizeCompetitors,
     rankCandidates,
     sourceName,
 } from './pure.js';
 import type {
     loadPrevious,
-    readCompetitors,
     readListPageVerdict,
     readNames,
+    readSeed,
     savePrevious,
-    writeCompetitors,
     writeListPageVerdict,
     writeNames,
+    writeSeed,
 } from './store.js';
-import type { fetchUrl, findList, Resolved } from './web.js';
+import type { fetchUrl, findIntegrations, Resolved } from './web.js';
 
 export interface Input {
     companyDomain: string;
@@ -99,16 +100,16 @@ export interface ChargeOutcome {
  * already tested in `pure.test.ts`, so injecting them here would just be indirection.
  */
 export interface Deps {
-    findList: typeof findList;
+    findIntegrations: typeof findIntegrations;
     fetchUrl: typeof fetchUrl;
-    extractCompetitors: typeof extractCompetitors;
+    seedCompetitors: typeof seedCompetitors;
     extractNames: typeof extractNames;
     isListPage: typeof isListPage;
     describeCandidates: typeof describeCandidates;
     readNames: typeof readNames;
     writeNames: typeof writeNames;
-    readCompetitors: typeof readCompetitors;
-    writeCompetitors: typeof writeCompetitors;
+    readSeed: typeof readSeed;
+    writeSeed: typeof writeSeed;
     readListPageVerdict: typeof readListPageVerdict;
     writeListPageVerdict: typeof writeListPageVerdict;
     loadPrevious: typeof loadPrevious;
@@ -128,10 +129,10 @@ export interface Deps {
 const CONCURRENCY = 4;
 
 /**
- * The whole pipeline: alternatives -> competitors -> own integrations -> peer and
- * directory source lists -> gap diff -> describe -> tag against the previous run ->
- * push -> charge. Everything that talks to the network, an LLM, or persisted state
- * goes through `deps`, so a caller (production `main.ts`, or a test) fully controls it.
+ * The whole pipeline: competitors -> own integrations -> peer and directory source
+ * lists -> gap diff -> describe -> tag against the previous run -> push -> charge.
+ * Everything that talks to the network, an LLM, or persisted state goes through `deps`,
+ * so a caller (production `main.ts`, or a test) fully controls it.
  */
 export async function runIntegrationRadar(input: Input, deps: Deps): Promise<RunSummary> {
     const { companyDomain } = input;
@@ -141,6 +142,10 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     const maxCompetitors = input.maxCompetitors ?? 20;
     const minSources = input.minSources ?? 2;
     const directories = input.directories?.length ? input.directories : DEFAULT_DIRECTORIES;
+    // Read here rather than in step 1, because the fingerprint below needs it: an
+    // explicit competitor list defines what the run looks at, so changing it must declare
+    // a baseline rather than report the change in the question as change in the world.
+    const supplied = input.competitors ?? [];
     const MAX_ROWS = deps.maxRows ?? 100;
 
     /** Charges are accumulated and applied only after the dataset is pushed. */
@@ -150,7 +155,7 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     // Identifies *what this run looks at*. Memory gathered under a different fingerprint
     // describes a different question and must not be diffed against — see
     // `inputFingerprint` and `mergeMemory` in pure.ts.
-    const fingerprint = inputFingerprint({ companyDomain, maxCompetitors, directories });
+    const fingerprint = inputFingerprint({ companyDomain, maxCompetitors, directories, competitors: supplied });
 
     log.info('Starting', { companyDomain, maxCompetitors, minSources, directories: directories.length });
 
@@ -220,7 +225,7 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
      * `apify.com/integrations` (95 names extracted).
      *
      * Path-tier hits skip the gate: they are deterministic and already pinned to the URL we
-     * guessed (`https://{domain}{PATHS[kind]}`), so a call would only confirm what we
+     * guessed (`https://{domain}{INTEGRATIONS_PATH}`), so a call would only confirm what we
      * already know at the cost of an LLM round trip. See the doc comment on `Resolved.tier`
      * in `web.ts` — it describes which mechanism ran, not whether it succeeded, so `hit`
      * is always checked first.
@@ -230,57 +235,81 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
      * run — see those functions' doc comments in `store.ts` for why re-gating unchanged
      * content on every run is a correctness risk, not just a cost one.
      */
-    async function confirmed(resolved: Resolved, kind: ListKind): Promise<Resolved> {
+    async function confirmed(resolved: Resolved): Promise<Resolved> {
         if (!resolved.hit || resolved.tier !== 'search') return resolved;
 
         const cachedVerdict = await deps.readListPageVerdict(resolved.key);
-        const isList = cachedVerdict ?? (await deps.isListPage(resolved.hit, kind));
+        const isList = cachedVerdict ?? (await deps.isListPage(resolved.hit));
         if (cachedVerdict === null) await deps.writeListPageVerdict(resolved.key, isList);
 
         if (isList) return resolved;
-        log.info('Rejected search hit — not a list page', { url: resolved.hit.url, kind });
+        log.info('Rejected search hit — not a list page', { url: resolved.hit.url });
         return { ...resolved, hit: null };
     }
 
-    // 1. The company's own view of its competitive set.
-    const alt = await confirmed(await deps.findList(companyDomain, 'alternatives'), 'alternatives');
-    if (!alt.hit) {
-        throw new Error(
-            `No alternatives or comparison page found for ${companyDomain}. Many companies ` +
-                'do not publish one; there is nothing to compare against.',
-        );
+    // 1. The competitor set. Explicit input wins; otherwise a permanently-cached seed;
+    //    otherwise one LLM call. This replaced reading the company's own /alternatives
+    //    page, which was a fatal single point of failure that only worked where companies
+    //    publish a multi-competitor comparison list — see the seed's doc comment in llm.ts.
+    let discovered: Company[];
+
+    if (supplied.length > 0) {
+        discovered = normalizeCompetitors(supplied.map((d) => ({ name: d, domain: d })));
+        const rejected = supplied.filter((d) => !discovered.some((c) => c.domain === sourceName(d)));
+        if (rejected.length > 0) log.warning('Ignored competitor entries that are not bare domains', { rejected });
+        if (discovered.length === 0) {
+            throw new Error(
+                `No usable competitor domains in the "competitors" input (rejected: ${supplied.join(', ')}). ` +
+                    'Use bare domains such as "rival.com".',
+            );
+        }
+        log.info('Competitors from input', { count: discovered.length });
+    } else {
+        const cached = await deps.readSeed(companyDomain, maxCompetitors);
+        discovered = cached ?? (await deps.seedCompetitors(companyDomain, maxCompetitors));
+        // `seedCompetitors` returns `[]` for all three of its failure modes — the LLM call
+        // failing, the model naming nobody, every entry being unusable — and they are
+        // deliberately indistinguishable here: none of them leaves anything to compare
+        // against, and all three have the same remedy.
+        if (discovered.length === 0) {
+            throw new Error(
+                `Could not determine competitors for ${companyDomain}. ` +
+                    'Pass them explicitly via the "competitors" input.',
+            );
+        }
+        // Stored raw, before the cut below: the record is keyed by `maxCompetitors`, so the
+        // cut is re-applied identically on every read.
+        if (!cached) await deps.writeSeed(companyDomain, maxCompetitors, discovered);
+        log.info('Competitors from seed', { count: discovered.length, fromCache: cached !== null });
     }
-    // This page costs a child-Actor fetch plus a full LLM extraction exactly like every
-    // other source, so it is charged like every other source. It used not to be, while
-    // the company's own integrations page was — two mismatches with the advertised
-    // event, in opposite directions.
-    if (!alt.fromCache) freshSources += 1;
 
-    // Cached against the alternatives page record, like every other extraction. Without
-    // this an LLM re-derived the competitor set from a marketing page on every run, so
-    // the source set the entire diff rests on was re-rolled each time — see
-    // `readCompetitors` in store.ts.
-    const cachedCompetitors = await deps.readCompetitors(alt.key);
-    const extracted = cachedCompetitors ?? (await deps.extractCompetitors(alt.hit));
-    if (!cachedCompetitors && extracted.length > 0) await deps.writeCompetitors(alt.key, extracted);
+    // The company itself is not a competitor to compare against: reading its own page as a
+    // peer would let its own names carry a candidate toward `minSources`. Models name the
+    // subject among its own rivals often enough to be worth the check. Compared without a
+    // `sourceName` call on the left — every producer of `discovered` (both branches above)
+    // runs `normalizeCompetitors`, so these domains are already normalized.
+    const eligible = discovered.filter((c) => c.domain !== sourceName(companyDomain));
+    if (eligible.length === 0) {
+        throw new Error(`No competitors left for ${companyDomain} after excluding the company itself.`);
+    }
 
-    const competitors = extracted
-        // `sourceName` on both sides: `www.apify.com` on apify.com's own alternatives
-        // page is the company itself, not a competitor to compare it against.
-        .filter((c) => sourceName(c.domain) !== sourceName(companyDomain))
-        // Sorted before the cut, so the selection depends on the *set* the model returned
-        // and not on the order it happened to return it in. `.slice` on raw model output
-        // is the same rank-cutoff bug already fixed one layer down for `MAX_ROWS`: a mere
-        // reordering swapped which competitors were read, and a competitor that silently
-        // left the set took its candidates out of the run's evidence with it.
-        .sort((a, b) => sourceName(a.domain).localeCompare(sourceName(b.domain)))
-        .slice(0, maxCompetitors);
-    if (competitors.length === 0) throw new Error(`No usable competitors extracted from ${alt.hit.url}`);
-    log.info('Competitors', { count: competitors.length, fromCache: cachedCompetitors !== null });
+    // Warned about *after* the self-exclusion, so the warning cannot fire on a run that
+    // truncated nothing (a list of maxCompetitors + 1 whose extra entry is the company
+    // itself loses nothing to the cut).
+    if (eligible.length > maxCompetitors) {
+        log.warning('Competitor list truncated', { found: eligible.length, maxCompetitors });
+    }
+
+    // No sort before the cut any more. The old alphabetical sort existed because `.slice`
+    // on freshly-extracted model output was rank-cutoff-unstable between runs; the seed is
+    // derived once and cached permanently, so the set no longer moves, and keeping the
+    // model's order means the cut keeps the most direct competitors rather than the
+    // alphabetically-first ones.
+    const competitors = eligible.slice(0, maxCompetitors);
 
     // 2. What the company already has. Without this the whole diff is meaningless,
     //    so a failure here is fatal rather than degraded.
-    const own = await confirmed(await deps.findList(companyDomain, 'integrations'), 'integrations');
+    const own = await confirmed(await deps.findIntegrations(companyDomain));
     if (!own.hit) throw new Error(`Could not read the integrations page for ${companyDomain}`);
     const mine = await namesFor(own);
     if (mine.length === 0) throw new Error(`Extracted no integrations from ${own.hit.url}`);
@@ -296,7 +325,7 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     const tierBySource = new Map<string, 'path' | 'search'>();
 
     const peerResults = await mapLimit(competitors, CONCURRENCY, async (competitor) => {
-        const resolved = await confirmed(await deps.findList(competitor.domain, 'integrations'), 'integrations');
+        const resolved = await confirmed(await deps.findIntegrations(competitor.domain));
         if (!resolved.hit) return null;
         const names = await namesFor(resolved);
         if (names.length === 0) return null;

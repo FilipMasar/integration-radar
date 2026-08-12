@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fetchUrl, findList } from '../src/web.js';
+import { fetchUrl, findIntegrations } from '../src/web.js';
 
 /**
  * Pins the fix for the Critical bug found in Task 4 fix round 1's re-review: a
@@ -19,7 +19,7 @@ import { fetchUrl, findList } from '../src/web.js';
  * content, not just call count.
  *
  * Also covers `Resolved.tier`, added the same round: `fetchUrl` always tags its
- * return `'path'` (it only ever tries the deterministic path tier), `findList`
+ * return `'path'` (it only ever tries the deterministic path tier), `findIntegrations`
  * tags `'path'` when the guess wins, `'search'` when the search wins, and `null`
  * when nothing resolves (including the known-miss short-circuit). Two independent
  * downstream needs read this field — Task 5's search-hit-only `isListPage` gate,
@@ -155,13 +155,13 @@ describe('fetchUrl miss recording', () => {
     });
 });
 
-describe('findList miss recording', () => {
+describe('findIntegrations miss recording', () => {
     it('does NOT write a search-tier miss when the search attempt throws', async () => {
         // Path guess: both engine attempts come back thin (completed, not matching).
         // Search: throws.
         outcomes = [{ items: [{ markdown: 'short' }] }, { items: [{ markdown: 'short' }] }, { throws: new Error('network blip') }];
 
-        const result = await findList('example.com', 'integrations');
+        const result = await findIntegrations('example.com');
 
         expect(result.hit).toBeNull();
         expect(missCallsFor('search-')).toHaveLength(0);
@@ -181,7 +181,7 @@ describe('findList miss recording', () => {
             }, // search: completes, but only an article-shaped result
         ];
 
-        const result = await findList('example.com', 'integrations');
+        const result = await findIntegrations('example.com');
 
         expect(result.hit).toBeNull();
         expect(missCallsFor('search-')).toEqual([[expect.stringContaining('search-')]]);
@@ -207,16 +207,16 @@ describe('Resolved.tier', () => {
         expect(result.tier).toBe('path');
     });
 
-    it('findList tags a path-guess resolution as tier "path"', async () => {
+    it('findIntegrations tags a path-guess resolution as tier "path"', async () => {
         outcomes = [{ items: [{ markdown: thickMarkdown('Our integrations.') }] }];
 
-        const result = await findList('example.com', 'integrations');
+        const result = await findIntegrations('example.com');
 
         expect(result.hit).not.toBeNull();
         expect(result.tier).toBe('path');
     });
 
-    it('findList tags a search resolution as tier "search"', async () => {
+    it('findIntegrations tags a search resolution as tier "search"', async () => {
         outcomes = [
             { items: [{ markdown: 'short' }] }, // path guess raw: thin
             { items: [{ markdown: 'short' }] }, // path guess render retry: thin
@@ -230,13 +230,13 @@ describe('Resolved.tier', () => {
             }, // search: resolves
         ];
 
-        const result = await findList('example.com', 'integrations');
+        const result = await findIntegrations('example.com');
 
         expect(result.hit?.url).toBe('https://example.com/integrations-list');
         expect(result.tier).toBe('search');
     });
 
-    it('findList tags a total miss as tier null', async () => {
+    it('findIntegrations tags a total miss as tier null', async () => {
         outcomes = [
             { items: [{ markdown: 'short' }] }, // path guess raw: thin
             { items: [{ markdown: 'short' }] }, // path guess render retry: thin
@@ -247,17 +247,17 @@ describe('Resolved.tier', () => {
             }, // search: completes, finds nothing usable
         ];
 
-        const result = await findList('example.com', 'integrations');
+        const result = await findIntegrations('example.com');
 
         expect(result.hit).toBeNull();
         expect(result.tier).toBeNull();
     });
 
-    it('findList tags a known-miss short-circuit as tier null and makes zero child calls', async () => {
-        mockReadMiss.mockResolvedValueOnce(true); // findList's own top-level check, before the path guess even runs
+    it('findIntegrations tags a known-miss short-circuit as tier null and makes zero child calls', async () => {
+        mockReadMiss.mockResolvedValueOnce(true); // findIntegrations' own top-level check, before the path guess even runs
         outcomes = [{ items: [{ markdown: thickMarkdown() }] }]; // would be consumed if any child call fired
 
-        const result = await findList('example.com', 'integrations');
+        const result = await findIntegrations('example.com');
 
         expect(result.hit).toBeNull();
         expect(result.tier).toBeNull();

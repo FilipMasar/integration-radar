@@ -2,7 +2,7 @@ import { log } from 'apify';
 import OpenAI from 'openai';
 import { z } from 'zod';
 
-import type { Company, ListKind, PageHit, RawCandidate } from './pure.js';
+import type { Company, PageHit, RawCandidate } from './pure.js';
 import { normalizeCompetitors } from './pure.js';
 
 /**
@@ -83,49 +83,6 @@ const EXTRACT_SYSTEM = 'You extract structured data from web pages. Reply with J
 const CompetitorsSchema = z.object({
     competitors: z.array(z.object({ name: z.string(), domain: z.string() })),
 });
-
-export async function extractCompetitors(page: PageHit): Promise<Company[]> {
-    const result = await completeJson(
-        `This Markdown is from ${page.url}, where a company compares itself to competitors.
-
-List every competing company named. Give each one's name and its primary website domain
-as a bare domain, no scheme or path.
-
-Only give a domain you are confident about. Some are not what they look like: Jina AI is
-jina.ai (not jinaai.com), Browse AI is browse.ai, Import.io is import.io, Make is make.com.
-If you are not confident, use an empty string rather than guessing.
-
-Exclude the company that owns this page. Exclude product categories.
-
-Reply as {"competitors": [{"name": "...", "domain": "..."}]}
-
----
-${page.markdown.slice(0, MAX_CHARS)}`,
-        CompetitorsSchema,
-        EXTRACT_SYSTEM,
-    );
-
-    if (!result) return [];
-
-    const DOMAIN_RE = /^[a-z0-9.-]+\.[a-z]{2,}$/;
-    const cleaned = result.competitors
-        .map((c) => ({
-            name: c.name.trim(),
-            domain: c.domain
-                .trim()
-                .toLowerCase()
-                .replace(/^https?:\/\//, '')
-                .replace(/\/.*$/, ''),
-        }))
-        // Drop anything without a valid domain rather than deriving one. A derived
-        // domain costs real money to probe and can land on a parked page that returns
-        // 200 — importio.com is exactly this.
-        .filter((c) => DOMAIN_RE.test(c.domain));
-
-    const unique = [...new Map(cleaned.map((c) => [c.domain, c])).values()];
-    log.info('Extracted competitors', { found: result.competitors.length, usable: unique.length });
-    return unique;
-}
 
 /**
  * The competitor set, from the model's own knowledge rather than from a page.
@@ -216,14 +173,9 @@ const IsListSchema = z.object({ isList: z.boolean(), reason: z.string() });
  * wrongly kept costs one extraction and shows up as noise a reader can see; a page wrongly
  * dropped is invisible, and silent false negatives are the worse failure for this Actor.
  */
-export async function isListPage(page: PageHit, kind: ListKind): Promise<boolean> {
-    const what =
-        kind === 'alternatives'
-            ? 'a list of competing or alternative products'
-            : 'a list of third-party integrations, apps or connectors';
-
+export async function isListPage(page: PageHit): Promise<boolean> {
     const result = await completeJson(
-        `Does this page primarily present ${what}?
+        `Does this page primarily present a list of third-party integrations, apps or connectors?
 
 Answer false if it is a product marketing or landing page, a pricing page, a docs
 homepage, a blog post, or a general overview that merely mentions such things.

@@ -2,20 +2,20 @@ import { setTimeout } from 'node:timers/promises';
 
 import { Actor, log } from 'apify';
 
-import { describeCandidates, extractCompetitors, extractNames, isListPage } from './llm.js';
+import { describeCandidates, extractNames, isListPage, seedCompetitors } from './llm.js';
 import type { Input } from './orchestrate.js';
 import { runIntegrationRadar } from './orchestrate.js';
 import {
     loadPrevious,
-    readCompetitors,
     readListPageVerdict,
     readNames,
+    readSeed,
     savePrevious,
-    writeCompetitors,
     writeListPageVerdict,
     writeNames,
+    writeSeed,
 } from './store.js';
-import { fetchUrl, findList } from './web.js';
+import { fetchUrl, findIntegrations } from './web.js';
 
 await Actor.init();
 
@@ -36,16 +36,16 @@ if (!input) throw new Error('Input is missing!');
 // wiring only: the real implementations, plus the two Actor methods that don't have a
 // standalone equivalent outside this SDK.
 const summary = await runIntegrationRadar(input, {
-    findList,
+    findIntegrations,
     fetchUrl,
-    extractCompetitors,
+    seedCompetitors,
     extractNames,
     isListPage,
     describeCandidates,
     readNames,
     writeNames,
-    readCompetitors,
-    writeCompetitors,
+    readSeed,
+    writeSeed,
     readListPageVerdict,
     writeListPageVerdict,
     loadPrevious,

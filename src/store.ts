@@ -61,12 +61,6 @@ interface CacheRecord {
      * `names` below — see `readListPageVerdict`/`writeListPageVerdict`.
      */
     isListPage?: boolean;
-    /**
-     * The competitor set extracted from an alternatives page — the same co-location
-     * rule as `names`, for a page whose extraction has a different shape. See
-     * `readCompetitors`/`writeCompetitors`.
-     */
-    competitors?: Company[];
 }
 
 /** Returns null on a miss OR on an expired entry — expiry is what makes change detection possible. */
@@ -117,7 +111,7 @@ export async function readNames(key: string): Promise<string[] | null> {
  * cost — at `temperature: 0` the verdict is *expected* to be stable but is not
  * guaranteed to be (queued/routed inference is a known source of residual variance,
  * and this codebase has already measured comparable flakiness one layer down, in
- * `findList`'s search resolution itself). An accepted→rejected flip on unchanged
+ * `findIntegrations`' search resolution itself). An accepted→rejected flip on unchanged
  * content is silently absorbed by the carry-forward rule in `main.ts` (it just reads
  * as "this source didn't resolve"), but a rejected→accepted flip has no safety net at
  * all: it injects a spurious `NEW` sourced from nothing but model nondeterminism.
@@ -145,41 +139,6 @@ export async function writeListPageVerdict(key: string, isListPage: boolean): Pr
     // Only ever attach to an existing page record — same rule as writeNames, and for
     // the same reason: a verdict with no page behind it would outlive its source.
     if (record) await kv.setValue(key, { ...record, isListPage });
-}
-
-/**
- * The competitor set extracted from an alternatives page, cached against that page's
- * record exactly like `names` — same key, same TTL, same "cannot outlive the page it
- * came from" guarantee.
- *
- * This was the one extraction with no cache, so an LLM re-derived the competitor set
- * from a marketing page on *every* run, warm or cold. That matters far beyond cost:
- * the competitor list is the source set the whole run is built on, and a set that is
- * re-rolled every run is a set that can silently shrink, taking the candidates that
- * only that competitor carried out of the run's evidence with it. Deciding once per
- * cached page removes the re-roll within the TTL window and cuts an LLM call from
- * every warm run.
- *
- * Returns `null` for "no competitors cached", never `[]` — an empty extraction is not
- * worth caching (the caller treats it as fatal) and `[]` would read back as a hit.
- */
-export async function readCompetitors(key: string): Promise<Company[] | null> {
-    const kv = await getStore();
-    const record = await kv.getValue<CacheRecord>(key);
-    if (!record?.competitors?.length) return null;
-
-    if (isExpired(record.fetchedAt, ttlHours(process.env.CACHE_TTL_HOURS, DEFAULT_CACHE_TTL_HOURS))) {
-        log.info('Competitors expired', { key });
-        return null;
-    }
-    return record.competitors;
-}
-
-export async function writeCompetitors(key: string, competitors: Company[]): Promise<void> {
-    const kv = await getStore();
-    const record = await kv.getValue<CacheRecord>(key);
-    // Only ever attach to an existing page record — same rule as writeNames.
-    if (record) await kv.setValue(key, { ...record, competitors });
 }
 
 export async function writeNames(key: string, names: string[]): Promise<void> {
