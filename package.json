@@ -2,10 +2,10 @@
 	"name": "integration-radar",
 	"version": "0.0.1",
 	"type": "module",
-	"description": "This is an example of an Apify Actor.",
+	"description": "Finds integrations a company's competitors and the wider ecosystem have but it does not, and tags what is new since the last run.",
 	"packageManager": "pnpm@10.28.0",
 	"engines": {
-		"node": ">=18.0.0"
+		"node": ">=22.0.0"
 	},
 	"dependencies": {
 		"apify": "^3.7.0",

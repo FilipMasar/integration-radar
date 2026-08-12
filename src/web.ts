@@ -1,4 +1,5 @@
 import { Actor, log } from 'apify';
+
 import type { ListKind, PageHit } from './pure.js';
 import { PATHS } from './pure.js';
 import { cacheKey, readCache, readMiss, writeCache, writeMiss } from './store.js';

@@ -15,7 +15,7 @@
         "maxCompetitors": {
             "title": "Maximum competitors",
             "type": "integer",
-            "description": "How many competitors to read. Alternatives pages are ordered by search volume, not relevance, so a low number tends to select the least relevant companies. 20 is a sensible floor.",
+            "description": "How many competitors to read. When an alternatives page names more than this, the set is cut in a fixed alphabetical order so the same page always yields the same competitors — a low number therefore drops real competitors arbitrarily. 20 is a sensible floor. Changing this makes the next run a fresh baseline rather than a NEW/SEEN diff.",
             "editor": "number",
             "default": 20,
             "minimum": 1,
@@ -24,9 +24,18 @@
         "directories": {
             "title": "Integration directories",
             "type": "array",
-            "description": "Large directories to harvest names from. Defaults are verified working; override to target a different ecosystem.",
+            "description": "Large directories to harvest names from. Leave empty to use the seven verified defaults shown here; override to target a different ecosystem. Changing this list makes the next run a fresh baseline rather than a NEW/SEEN diff, because it changes what the run looks at.",
             "editor": "stringList",
-            "default": []
+            "default": [],
+            "prefill": [
+                "https://n8n.io/integrations/",
+                "https://zapier.com/apps",
+                "https://www.make.com/en/integrations",
+                "https://pipedream.com/apps",
+                "https://python.langchain.com/docs/integrations/providers/",
+                "https://docs.llamaindex.ai/en/stable/module_guides/loading/connector/modules/",
+                "https://smithery.ai/"
+            ]
         },
         "minSources": {
             "title": "Minimum sources per candidate",
