@@ -228,7 +228,7 @@ describe('readMiss / writeMiss', () => {
     it('reads the 6h miss TTL, not the 24h page TTL', async () => {
         // Pointing readMiss at CACHE_TTL_HOURS passes every other test in this file, and
         // would make a transient miss stick for a full day instead of six hours.
-        kvData.set('key-miss', { missedAt: hoursAgo(10), reason: 'thin' });
+        kvData.set('key-miss', { missedAt: hoursAgo(10) });
         kvData.set('key', { fetchedAt: hoursAgo(10), hit: PAGE });
 
         expect(await readMiss('key')).toBe(false); // 10h > 6h
@@ -236,7 +236,7 @@ describe('readMiss / writeMiss', () => {
     });
 
     it('honours MISS_TTL_HOURS and CACHE_TTL_HOURS independently', async () => {
-        kvData.set('key-miss', { missedAt: hoursAgo(1), reason: 'thin' });
+        kvData.set('key-miss', { missedAt: hoursAgo(1) });
         kvData.set('key', { fetchedAt: hoursAgo(1), hit: PAGE });
 
         process.env.CACHE_TTL_HOURS = '0';
@@ -247,10 +247,23 @@ describe('readMiss / writeMiss', () => {
         process.env.MISS_TTL_HOURS = '0';
         expect(await readMiss('key')).toBe(false); // forced miss expiry...
         expect(await readCache('key')).toEqual(PAGE); // ...must not expire the page
+        // Cleared here, not just in this block's `beforeEach`: a forced `0` TTL left set
+        // leaks into every describe that follows (the seed block, `loadPrevious`), whose own
+        // hooks clear `kvData` but not the environment. Nothing there reads a TTL today, so
+        // the leak would surface as a mystery failure in whichever test first did.
+        delete process.env.MISS_TTL_HOURS;
     });
 });
 
 describe('readSeed / writeSeed', () => {
+    // The one block in this file that used to run on whatever the previous describe left
+    // behind — a store still holding its keys, and its forced-expiry env vars still set.
+    beforeEach(() => {
+        kvData.clear();
+        delete process.env.CACHE_TTL_HOURS;
+        delete process.env.MISS_TTL_HOURS;
+    });
+
     const RIVALS = [{ name: 'Rival', domain: 'rival.com' }];
 
     it('round-trips a seed', async () => {

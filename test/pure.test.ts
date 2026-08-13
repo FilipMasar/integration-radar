@@ -94,6 +94,11 @@ describe('normalizeCompetitors', () => {
 
     it('drops an entry whose domain is not a domain', () => {
         expect(normalizeCompetitors([{ name: 'Bad', domain: 'not a domain' }])).toEqual([]);
+        // Two cases, because 'not a domain' fails `DOMAIN_RE` for two independent reasons
+        // (spaces AND no dot) and would still be rejected by a pattern that dropped the dot
+        // requirement — which would then accept a bare model-invented word like this one and
+        // spend a real fetch on it.
+        expect(normalizeCompetitors([{ name: 'Bad', domain: 'notadomain' }])).toEqual([]);
     });
 
     it('deduplicates entries that share a domain, keeping the first', () => {
@@ -123,13 +128,25 @@ describe('rankCandidates', () => {
         expect(rankCandidates([], sources).map((c) => c.slug)).toEqual(['two-source', 'one-source']);
     });
 
+    const mixedSources = [
+        { name: 'firecrawl.dev', kind: 'peer' as const, names: ['Weaviate', 'Slack', 'API'] },
+        { name: 'zyte.com', kind: 'peer' as const, names: ['Weaviate'] },
+        { name: 'n8n.io', kind: 'directory' as const, names: ['Weaviate', 'Clay'] },
+    ];
+
     it('excludes generic stopwords that are not real integrations', () => {
-        const s = [
-            { name: 'firecrawl.dev', kind: 'peer' as const, names: ['Weaviate', 'Slack', 'API'] },
-            { name: 'zyte.com', kind: 'peer' as const, names: ['Weaviate'] },
-            { name: 'n8n.io', kind: 'directory' as const, names: ['Weaviate', 'Clay'] },
-        ];
-        expect(rankCandidates([], s).map((c) => c.slug)).not.toContain('api');
+        expect(rankCandidates([], mixedSources).map((c) => c.slug)).not.toContain('api');
+    });
+
+    it('counts peers and directories separately, and cites every source in carriedBy', () => {
+        // `carriedBy` is the product's evidence field — the only thing a reader can check a
+        // row against — so both its multi-source content and its peers-then-directories
+        // ordering are pinned, not just its length.
+        const [top] = rankCandidates([], mixedSources);
+        expect(top.slug).toBe('weaviate');
+        expect(top.peerCount).toBe(2);
+        expect(top.directoryCount).toBe(1);
+        expect(top.carriedBy).toEqual(['firecrawl.dev', 'zyte.com', 'n8n.io']);
     });
 
     it('excludes candidates with cross-alias ownership normalization', () => {
@@ -137,7 +154,7 @@ describe('rankCandidates', () => {
         expect(rankCandidates(['Amazon S3'], s)).toEqual([]);
     });
 
-    it('sorts by peer count first, then directory count as tie-breaker', () => {
+    it('sorts by peer count first, ahead of any number of directories', () => {
         const s = [
             { name: 'a.com', kind: 'peer' as const, names: ['rare'] },
             { name: 'b.com', kind: 'peer' as const, names: ['rare', 'common'] },
@@ -145,6 +162,22 @@ describe('rankCandidates', () => {
             { name: 'd2.io', kind: 'directory' as const, names: ['common'] },
         ];
         expect(rankCandidates([], s).map((c) => c.slug)).toEqual(['rare', 'common']);
+    });
+
+    it('breaks a peer-count tie on directory count', () => {
+        // The case the test above cannot reach: it gives 'rare' 2 peers against 'common''s
+        // 1, so the peer-count clause decides on its own and the directory-count clause is
+        // never consulted — deleting that clause leaves it green. Here both candidates have
+        // exactly one peer, so directory count is the only thing that can order them, and
+        // 'zzz-more-dirs' sorting first also rules out the alphabetical fallback doing it.
+        const s = [
+            { name: 'a.com', kind: 'peer' as const, names: ['zzz-more-dirs', 'aaa-fewer-dirs'] },
+            { name: 'd1.io', kind: 'directory' as const, names: ['zzz-more-dirs', 'aaa-fewer-dirs'] },
+            { name: 'd2.io', kind: 'directory' as const, names: ['zzz-more-dirs'] },
+        ];
+        const ranked = rankCandidates([], s);
+        expect(ranked.map((c) => c.peerCount)).toEqual([1, 1]);
+        expect(ranked.map((c) => c.slug)).toEqual(['zzz-more-dirs', 'aaa-fewer-dirs']);
     });
 });
 
@@ -175,9 +208,19 @@ describe('inputFingerprint', () => {
         expect(inputFingerprint(loose)).toBe(inputFingerprint(strict));
     });
 
-    it('changes when competitors are supplied', () => {
+    it('changes when a competitor set is present at all', () => {
         const base = { companyDomain: 'mine.com', maxCompetitors: 20, directories: ['https://d.io'] };
         expect(inputFingerprint({ ...base, competitors: ['rival.com'] })).not.toBe(inputFingerprint(base));
+    });
+
+    it('changes when one competitor is swapped for another', () => {
+        // The field carries the set the run *effectively reads* (see the call site in
+        // orchestrate.ts), so two same-length sets that differ by one entry are two different
+        // questions and the next run must not diff one against the other.
+        const base = { companyDomain: 'mine.com', maxCompetitors: 2, directories: ['https://d.io'] };
+        expect(inputFingerprint({ ...base, competitors: ['a.com', 'b.com'] })).not.toBe(
+            inputFingerprint({ ...base, competitors: ['a.com', 'c.com'] }),
+        );
     });
 
     it('does not change when the same competitors are reordered or duplicated', () => {
