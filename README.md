@@ -95,28 +95,29 @@ Integration Radar is priced pay-per-event (PPE), not per compute unit. Two event
 
 ### What a run is estimated to cost
 
-**These figures are not a measurement of the mechanism this Actor ships.** The only cold run
-actually measured against `apify.com` (20 competitors requested, 7 directories) used the
-previous, now-deleted alternatives-page discovery mechanism: it charged for 18 fresh sources
-(the alternatives page, the own integrations page, 9 of 20 competitors whose integrations
-page could be resolved, and 7 directories) and produced 57 rows. The table and range below
-are that same measured run's numbers with the alternatives-page fetch — which the shipped
-code no longer performs — arithmetically removed; they are a recomputation, not a fresh
-measurement of the seed-based mechanism. Task 11 will replace this section with numbers
-measured against the shipped code.
+These figures come from a live run of the shipped seed-based mechanism against
+`apify.com` (`maxCompetitors: 20`, 7 directories). Of the 20 competitor domains the model
+seeded, 7 resolved a usable integrations page, so the run read 15 sources in total: the
+company's own page, those 7 competitor pages, and 7 directories. It produced 53 candidate
+rows.
+
+That run's page cache was already warm from earlier testing, so only 3 of the 15 sources
+were actually fetched fresh and billed — the other 12 were free cache hits. The counts
+below (15 sources, 53 rows) are measured; the cost is priced as a **cold** first run, where
+all 15 sources are fetched fresh, since that is what a new user is actually budgeting for.
 
 | | Count | Cost |
 |---|---|---|
-| `source-analyzed` | 17 — the own integrations page, the 9 of 20 competitors whose integrations page could be resolved, and 7 directories | $0.34 |
-| `candidate-found` | 57 rows | $1.14 |
-| **Total** | **74 events** | **$1.48** |
+| `source-analyzed` (cold-run) | 15 — the own integrations page, 7 resolved competitor pages, and 7 directories | $0.30 |
+| `candidate-found` | 53 rows | $1.06 |
+| **Total** | **68 events** | **$1.36** |
 
-Expect **$1.08–$1.58** for a comparable first run (14–19 fresh sources at $0.28–$0.38, plus 40–60 rows at $0.80–$1.20) — recomputed the same way, and equally not yet re-measured. Fewer than half of a typical competitor set publish a findable integrations page, so the fresh-source count usually lands well below `maxCompetitors`.
+Expect **$1.14–$1.56** for a comparable first run (12–18 fresh sources at $0.24–$0.36, plus 45–60 rows at $0.90–$1.20). Fewer than half of a typical competitor set publishes a findable integrations page (7 of 20 here), so the fresh-source count usually lands well below `maxCompetitors`.
 
 What drives cost:
 
 - **Number of competitors** (`maxCompetitors`) — more competitors means more pages to read, and more `source-analyzed` events on a cold run.
-- **Cache warmth** — a page fetched on a previous run is served from cache and charges nothing under `source-analyzed`. Applied to the recomputed figures above, a same-day re-run would drop the whole $0.34 and cost $1.14.
+- **Cache warmth** — a page fetched on a previous run is served from cache and charges nothing under `source-analyzed`. A same-day re-run — confirmed in the live run above, which saw `freshSources: 0` on its second pass — drops the entire $0.30 `source-analyzed` line and costs just $1.06.
 - **`minSources`** — raising it reduces the number of rows that clear the bar, which lowers `candidate-found` charges (and noise) together. This is the bigger lever of the two: rows outnumber sources roughly three to one.
 
 Note that a warm re-run is cheaper but not dramatically so, because `candidate-found` is charged for every row on every run, not only for rows that changed.
@@ -160,7 +161,7 @@ direct fix.
 
 **Why is there no priority score or effort estimate?** Because the Actor has no way to know it honestly. It doesn't know your roadmap, your engineering capacity, or your existing partnerships — only `peerCount`, `directoryCount`, and `carriedBy`, which are evidence you can inspect, not a verdict.
 
-**What does `weakEvidence: true` mean, and why does it exist?** Some competitor pages can't be found at a predictable URL and are instead located through a site-scoped search. Search results are less stable than a fixed URL — the same competitor's page can resolve on one run and fail to resolve on the next, even though nothing on their site changed. In the one run measured so far under the previous discovery mechanism (see [Pricing](#pricing--cost-estimation) for what that run did and didn't cover), this affected 6 of 57 rows; the shipped mechanism has not yet had this re-measured. To avoid false "this integration was removed" signals caused by nothing more than a flaky search result, the Actor never treats an unresolved source as evidence of removal: it records which sources its memory actually rests on, and only lets a candidate drop out on a run that read every one of them. `weakEvidence` flags exactly which rows rest on that less-stable kind of evidence so you can weigh them accordingly.
+**What does `weakEvidence: true` mean, and why does it exist?** Some competitor pages can't be found at a predictable URL and are instead located through a site-scoped search. Search results are less stable than a fixed URL — the same competitor's page can resolve on one run and fail to resolve on the next, even though nothing on their site changed. In the live run measured against `apify.com` (see [Pricing](#pricing--cost-estimation)), at least one resolved source — Bright Data's — was found only via a cached search hit rather than a fixed URL guess; that run did not separately track how many of its 53 rows carried `weakEvidence: true` as a result. To avoid false "this integration was removed" signals caused by nothing more than a flaky search result, the Actor never treats an unresolved source as evidence of removal: it records which sources its memory actually rests on, and only lets a candidate drop out on a run that read every one of them. `weakEvidence` flags exactly which rows rest on that less-stable kind of evidence so you can weigh them accordingly.
 
 **Is scraping these pages legal?** Integration Radar only reads pages that companies have published publicly on the open web (their own and competitors' integrations pages and public integration directories) — no login, no paywalled content. You are responsible for using the output in line with the terms of the sites involved and applicable law in your jurisdiction.
 
