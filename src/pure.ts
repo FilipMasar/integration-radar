@@ -259,6 +259,13 @@ export function rankCandidates(mine: string[], sources: SourceList[]): RawCandid
  * `minSources` is deliberately NOT part of it. Memory now holds the full ranked pool
  * (`Memory.slugs`), so `minSources` changes only what is displayed and can never move a
  * slug in or out of memory — fingerprinting it would force a pointless baseline run.
+ *
+ * Both list fields describe what the run *effectively* reads, not what arrived in the
+ * input: `directories` is the resolved list (an empty input means `DEFAULT_DIRECTORIES`)
+ * and `competitors` is the set left after the self-exclusion and the `maxCompetitors`
+ * cut. Fingerprinting either raw input instead would let the sources actually read change
+ * without the fingerprint moving, which is the fabricated-`NEW` failure this exists to
+ * prevent — see the call site in `orchestrate.ts` for the reordering case that proves it.
  */
 export function inputFingerprint(input: {
     companyDomain: string;
@@ -272,9 +279,11 @@ export function inputFingerprint(input: {
         // Sorted and deduped: reordering the same list is not a different question.
         directories: [...new Set(input.directories.map((u) => u.trim().toLowerCase().replace(/\/+$/, '')))].sort(),
         // Same treatment, normalized through `sourceName` so `www.a.com` and `a.com` are
-        // one entry. An explicit competitor list defines what the run looks at just as
-        // much as `directories` does, so changing it must declare a baseline rather than
-        // report the change in the question as change in the world.
+        // one entry: it is the *set* of competitor pages that defines what the run looks
+        // at, exactly as `directories` does, so a change to it must declare a baseline
+        // rather than report the change in the question as change in the world. The caller
+        // passes the set it actually reads (post-cut), which is why sorting here cannot
+        // hide a change in which entries survived the cut.
         competitors: [...new Set((input.competitors ?? []).map(sourceName))].sort(),
     });
 }

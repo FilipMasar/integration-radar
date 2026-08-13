@@ -96,14 +96,29 @@ function baseDeps(overrides: Partial<Deps> = {}): Deps {
 }
 
 /**
- * The fingerprint a run of `BASE_INPUT` produces. Stored memory carrying anything else
- * makes the run a baseline, so any test that wants a real NEW/SEEN diff must seed this.
+ * The fingerprint a run of `BASE_INPUT` against `baseDeps` produces. Stored memory carrying
+ * anything else makes the run a baseline, so any test that wants a real NEW/SEEN diff must
+ * seed this.
+ *
+ * `competitors` is spelled out even though `BASE_INPUT` supplies none: the fingerprint covers
+ * the competitor set the run *effectively reads* (post self-exclusion, post `maxCompetitors`
+ * cut), which for `baseDeps` is the one domain its seed names. A test that overrides the seed
+ * with a different set needs its own fingerprint.
  */
-const BASE_FINGERPRINT = inputFingerprint(BASE_INPUT);
+const BASE_FINGERPRINT = inputFingerprint({ ...BASE_INPUT, competitors: ['rival.com'] });
 
 /** Stored memory for `BASE_INPUT`, fingerprinted so the next run diffs rather than rebaselines. */
 function storedMemory(slugs: string[], sources: string[]): StoredMemory {
     return { slugs, sources, fingerprint: BASE_FINGERPRINT };
+}
+
+/**
+ * Stored memory for a run whose seed names something other than `baseDeps`' single
+ * `rival.com` — the fingerprint has to name that run's own effective competitor set, or the
+ * run rebaselines and the behavior under test never gets exercised.
+ */
+function storedMemoryFor(competitors: string[], slugs: string[], sources: string[]): StoredMemory {
+    return { slugs, sources, fingerprint: inputFingerprint({ ...BASE_INPUT, competitors }) };
 }
 
 describe('runIntegrationRadar — requirement 1: gate search-tier hits, not path-tier hits', () => {
@@ -196,9 +211,15 @@ describe('runIntegrationRadar — requirement 2: carry-forward on unresolved sou
                 if (page.url === okHit.url) return ['Stable Candidate'];
                 return [];
             }),
-            // Memory rests on both competitors; only ok.com answered this run.
+            // Memory rests on both competitors; only ok.com answered this run. Fingerprinted
+            // against this run's own two-competitor set, so the run is a real diff — a
+            // mismatch would rebaseline it and never exercise the carry-forward rule.
             loadPrevious: vi.fn(async () =>
-                storedMemory(['flaky-only-candidate', 'stable-candidate'], ['ok.com', 'flaky.com']),
+                storedMemoryFor(
+                    ['ok.com', 'flaky.com'],
+                    ['flaky-only-candidate', 'stable-candidate'],
+                    ['ok.com', 'flaky.com'],
+                ),
             ),
         });
 
@@ -1065,6 +1086,7 @@ describe('runIntegrationRadar — the fingerprint covers the effective directori
                     companyDomain: 'mine.com',
                     maxCompetitors: 20,
                     directories: DEFAULT_DIRECTORIES,
+                    competitors: ['rival.com'],
                 }),
             })),
         });
@@ -1073,5 +1095,103 @@ describe('runIntegrationRadar — the fingerprint covers the effective directori
 
         expect(summary.isBaseline).toBe(false);
         expect(summary.rows.find((r) => r.slug === 'candidate-one')?.status).toBe('SEEN');
+    });
+});
+
+describe('runIntegrationRadar — the fingerprint covers the effective competitor set', () => {
+    /** Every competitor domain resolves, each page carrying one candidate named after it. */
+    function resolvingDeps(overrides: Partial<Deps> = {}): Deps {
+        return baseDeps({
+            findIntegrations: vi.fn(
+                async (domain: string): Promise<Resolved> =>
+                    resolved({ hit: hit(`https://${domain}/integrations`), key: domain }),
+            ),
+            extractNames: vi.fn(async (page: PageHit): Promise<string[]> =>
+                page.url.includes('mine.com') ? ['Existing Thing'] : [`From ${new URL(page.url).hostname}`],
+            ),
+            ...overrides,
+        });
+    }
+
+    /** One run against a given stored memory, returning what it stored for the next one. */
+    async function run(
+        input: Input,
+        previous: StoredMemory | null,
+        overrides: Partial<Deps> = {},
+    ): Promise<{ summary: Awaited<ReturnType<typeof runIntegrationRadar>>; stored: StoredMemory }> {
+        const saved: StoredMemory[] = [];
+        const deps = resolvingDeps({
+            loadPrevious: vi.fn(async () => previous),
+            savePrevious: vi.fn(async (_domain: string, memory: StoredMemory) => {
+                saved.push(memory);
+            }),
+            ...overrides,
+        });
+        const summary = await runIntegrationRadar(input, deps);
+        return { summary, stored: saved[0] };
+    }
+
+    it('declares a baseline when reordering an over-long supplied list changes which competitors are read', async () => {
+        const first: Input = { ...BASE_INPUT, maxCompetitors: 2, competitors: ['a.com', 'b.com', 'c.com'] };
+        const { stored } = await run(first, null);
+
+        // The same three domains in a different order — but the cut keeps the user's first
+        // two, so this run reads c.com and b.com where the last one read a.com and b.com.
+        // Fingerprinting the *supplied* list sorts and dedupes it ("reordering the same list
+        // is not a different question"), which is true only while the list fits under
+        // `maxCompetitors`. Past the cut, reordering changes which page is opened, and every
+        // candidate carried only by c.com would be reported NEW — "your competitor just
+        // added this" when nothing happened but a reordered input.
+        const reordered: Input = { ...first, competitors: ['c.com', 'b.com', 'a.com'] };
+        const { summary } = await run(reordered, stored);
+
+        expect(summary.isBaseline).toBe(true);
+        expect(summary.rows.some((r) => r.status === 'NEW')).toBe(false);
+        expect(summary.rows.find((r) => r.slug === 'from-c-com')?.status).toBe('BASELINE');
+    });
+
+    it('still diffs when the same over-long list is submitted in the same order', async () => {
+        // The control the test above needs: fingerprinting the effective set must not turn
+        // every run into a baseline. Same input twice, same two competitors read, so the
+        // second run is a real diff.
+        const input: Input = { ...BASE_INPUT, maxCompetitors: 2, competitors: ['a.com', 'b.com', 'c.com'] };
+        const { stored } = await run(input, null);
+        const { summary } = await run(input, stored);
+
+        expect(summary.isBaseline).toBe(false);
+        expect(summary.rows.find((r) => r.slug === 'from-a-com')?.status).toBe('SEEN');
+    });
+
+    it('keeps the fingerprint stable across runs on the seeded path, so a cached seed never rebaselines', async () => {
+        // The consequence of fingerprinting the effective set rather than the input: on the
+        // seeded path that set is the model's domains, not anything the user typed. It has to
+        // be identical run to run — the seed is cached permanently and the cut is re-applied
+        // identically on every read — or every run would declare BASELINE forever and
+        // NEW/SEEN would never work at all, which is worse than the bug being fixed.
+        const seeded: Company[] = [
+            { name: 'A', domain: 'a.com' },
+            { name: 'B', domain: 'b.com' },
+            { name: 'C', domain: 'c.com' },
+        ];
+        // A seed record that survives between the two runs, like the real named store.
+        let seedRecord: Company[] | null = null;
+        const seedSpy = vi.fn(async () => seeded);
+        const persistentSeed: Partial<Deps> = {
+            readSeed: vi.fn(async () => seedRecord),
+            writeSeed: vi.fn(async (_domain: string, _max: number, competitors: Company[]) => {
+                seedRecord = competitors;
+            }),
+            seedCompetitors: seedSpy,
+        };
+
+        // maxCompetitors below the seed length, so the cut is live on both runs.
+        const input: Input = { ...BASE_INPUT, maxCompetitors: 2 };
+        const first = await run(input, null, persistentSeed);
+        const second = await run(input, first.stored, persistentSeed);
+
+        expect(seedSpy).toHaveBeenCalledTimes(1); // run 2 read the cache
+        expect(second.stored.fingerprint).toBe(first.stored.fingerprint);
+        expect(second.summary.isBaseline).toBe(false);
+        expect(second.summary.rows.find((r) => r.slug === 'from-a-com')?.status).toBe('SEEN');
     });
 });

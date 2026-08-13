@@ -30,7 +30,9 @@ export interface Input {
     directories: string[];
     minSources: number;
     /** Optional explicit competitor domains. When non-empty, discovery is skipped
-     * entirely — no seed read, no LLM call. Joins the fingerprint. */
+     * entirely — no seed read, no LLM call. What joins the fingerprint is the set left
+     * after the `maxCompetitors` cut, not this list verbatim — see the `fingerprint`
+     * call site below. */
     competitors?: string[];
 }
 
@@ -153,20 +155,12 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     }
     const minSources = input.minSources ?? 2;
     const directories = input.directories?.length ? input.directories : DEFAULT_DIRECTORIES;
-    // Read here rather than in step 1, because the fingerprint below needs it: an
-    // explicit competitor list defines what the run looks at, so changing it must declare
-    // a baseline rather than report the change in the question as change in the world.
     const supplied = input.competitors ?? [];
     const MAX_ROWS = deps.maxRows ?? 100;
 
     /** Charges are accumulated and applied only after the dataset is pushed. */
     let freshSources = 0;
     const runDate = new Date().toISOString().slice(0, 10);
-
-    // Identifies *what this run looks at*. Memory gathered under a different fingerprint
-    // describes a different question and must not be diffed against — see
-    // `inputFingerprint` and `mergeMemory` in pure.ts.
-    const fingerprint = inputFingerprint({ companyDomain, maxCompetitors, directories, competitors: supplied });
 
     log.info('Starting', { companyDomain, maxCompetitors, minSources, directories: directories.length });
 
@@ -317,6 +311,34 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     // model's order means the cut keeps the most direct competitors rather than the
     // alphabetically-first ones.
     const competitors = eligible.slice(0, maxCompetitors);
+
+    // Identifies *what this run looks at*. Memory gathered under a different fingerprint
+    // describes a different question and must not be diffed against — see
+    // `inputFingerprint` and `mergeMemory` in pure.ts.
+    //
+    // Computed HERE, after the cut, from the competitor set actually read — not from
+    // `input.competitors`. `inputFingerprint` sorts and dedupes what it is given, on the
+    // principle that reordering the same list is not a different question. That is true
+    // only while the list fits under `maxCompetitors`: past the cut, reordering decides
+    // which entries survive it, so `['a.com','b.com','c.com']` and `['c.com','b.com',
+    // 'a.com']` with `maxCompetitors: 2` open different pages under one fingerprint —
+    // and every candidate carried only by the entry that swapped in is then reported
+    // `NEW` with nothing having changed in the world. `mergeMemory` cannot rescue this;
+    // limit #2 in its doc comment is exactly this case (it governs memory loss, not
+    // gain). Sorting the supplied list before the cut would also fix it, but at the cost
+    // of resurrecting the alphabetical cut this branch deliberately removed and of
+    // discarding the priority order a user expressed in their own list.
+    //
+    // On the seeded path the effective set is the model's domains, which is stable
+    // run-to-run precisely because the seed is cached permanently and the cut is
+    // re-applied identically on every read — see `readSeed` in store.ts. If that ever
+    // stops holding, this fingerprint changes every run and every run reports BASELINE.
+    const fingerprint = inputFingerprint({
+        companyDomain,
+        maxCompetitors,
+        directories,
+        competitors: competitors.map((c) => c.domain),
+    });
 
     // 2. What the company already has. Without this the whole diff is meaningless,
     //    so a failure here is fatal rather than degraded.

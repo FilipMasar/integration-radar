@@ -34,9 +34,9 @@ Integration Radar takes one required field and four optional tuning knobs. See t
 | `directories` | array of strings | No | 7 built-in directories (n8n, Zapier, Make, Pipedream, LangChain, LlamaIndex, Smithery) | Large integration directories to harvest names from. Override to target a different ecosystem. A directory that is also one of the discovered competitors is read once, not twice — as that competitor if its integrations page resolves, and as the directory otherwise. |
 | `minSources` | integer | No | `2` | Only report a name carried by at least this many sources (competitors + directories combined). Raise it to cut noise. This filters the report only — every candidate found is remembered regardless, so turning this knob never fabricates a `NEW`. |
 
-### Changing `competitors`, `maxCompetitors`, or `directories` resets the comparison
+### Changing what the run reads resets the comparison
 
-`NEW` means "no source we read last time carried this name." That claim is only honest if both runs looked at the same things, so the Actor records a fingerprint of `companyDomain`, `maxCompetitors`, `competitors` and `directories` alongside its memory. If you change any of the three tuning knobs, the next run reports `BASELINE` for every row instead of a diff, and resumes `NEW`/`SEEN` tagging from the run after that. `minSources` is exempt — it only filters the report, so you can turn it freely without losing your history.
+`NEW` means "no source we read last time carried this name." That claim is only honest if both runs looked at the same things, so the Actor records a fingerprint of `companyDomain`, `maxCompetitors`, `directories` and the competitor set alongside its memory. The competitor set in that fingerprint is the one the run actually reads — after the `maxCompetitors` cut, and whether you supplied it or the model named it — so anything that changes which pages get opened is caught, including reordering a `competitors` list longer than `maxCompetitors` and deleting the cached seed. When it changes, the next run reports `BASELINE` for every row instead of a diff, and resumes `NEW`/`SEEN` tagging from the run after that. `minSources` is exempt — it only filters the report, so you can turn it freely without losing your history.
 
 Example input:
 
@@ -128,7 +128,7 @@ Note that a warm re-run is cheaper but not dramatically so, because `candidate-f
 - **Raise `minSources` to cut noise.** The default of 2 favors recall. If the output includes names that feel like directory noise (see limitations below), raising `minSources` to 3 or 4 trades some coverage for higher-confidence rows.
 - **Widen `maxCompetitors` for a more thorough sweep**, up to the 30 maximum — the model may know more direct competitors than the default keeps, and the cut respects its most-direct-first ordering, so a lower number already drops the least-relevant entries first, not arbitrary ones.
 - **Point `directories` at a different ecosystem** if your company's competitors are not automation/AI-platform adjacent — pass your own list of large, well-maintained integration directories relevant to your space instead of the defaults.
-- **Expect one `BASELINE` run after changing `competitors`, `maxCompetitors`, or `directories`.** See [Input](#input) — it is deliberate, and it is what stops a tuning change from being reported as competitor activity.
+- **Expect one `BASELINE` run whenever the set of pages read changes** — after editing `competitors`, `maxCompetitors` or `directories`, and equally after deleting the cached seed so a fresh competitor set is derived. See [Input](#input) — it is deliberate, and it is what stops a tuning change from being reported as competitor activity.
 - **Check `weakEvidence` before treating a `NEW` row as confirmed.** A `true` value means at least one contributing source was resolved through a site-scoped search rather than a fixed URL guess, and search results can point to a different page on the next run.
 
 ## FAQ, limitations, and support
