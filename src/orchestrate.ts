@@ -153,6 +153,14 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     if (!Number.isInteger(maxCompetitors) || maxCompetitors < 1) {
         throw new Error(`"maxCompetitors" must be an integer of at least 1, got ${maxCompetitors}.`);
     }
+    // Same standard as the guard above, and the same reason: the schema's `type: array`
+    // binds the Console form, not an API caller. A bare string satisfies the
+    // `supplied.length > 0` test in step 1 (strings have a length), so without this the run
+    // dies inside `normalizeCompetitors` with `input.competitors.map is not a function`,
+    // which names neither the input nor the mistake.
+    if (input.competitors !== undefined && !Array.isArray(input.competitors)) {
+        throw new Error('"competitors" must be an array of bare domains, such as ["rival.com"].');
+    }
     const minSources = input.minSources ?? 2;
     const directories = input.directories?.length ? input.directories : DEFAULT_DIRECTORIES;
     const supplied = input.competitors ?? [];

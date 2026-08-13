@@ -957,6 +957,22 @@ describe('runIntegrationRadar — step 1: the competitor seed', () => {
         ).rejects.toThrow('No usable competitor domains in the "competitors" input');
     });
 
+    it('rejects a competitors input that is not an array', async () => {
+        // The schema's `type: array` binds the Console form, not an API caller. A bare
+        // string has a `length`, so it passes the `supplied.length > 0` test and then dies
+        // inside `normalizeCompetitors` with `input.competitors.map is not a function` —
+        // an error naming neither the input nor the mistake.
+        const deps = baseDeps();
+
+        await expect(
+            // Cast because the whole scenario is a caller who ignored the type.
+            runIntegrationRadar({ ...BASE_INPUT, competitors: 'rival.com' as unknown as string[] }, deps),
+        ).rejects.toThrow('"competitors" must be an array of bare domains');
+        // Fatal before anything is fetched or billed, same as the maxCompetitors guard.
+        expect(deps.findIntegrations).not.toHaveBeenCalled();
+        expect(deps.charge).not.toHaveBeenCalled();
+    });
+
     it('excludes the analyzed company from its own competitor set', async () => {
         const deps = baseDeps({
             // Domains as `seedCompetitors` really returns them: every producer of a

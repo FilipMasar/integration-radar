@@ -135,6 +135,18 @@ describe('seedCompetitors', () => {
         expect(sentPrompt()).toContain('7');
     });
 
+    it('does not tell the model it is reading a web page — there is none in this call', async () => {
+        // `EXTRACT_SYSTEM` ("You extract structured data from web pages") fronted this call
+        // for one commit. The seed asks the model to recall companies from its own knowledge,
+        // and a system prompt describing the opposite job undercuts the prompt's own "say
+        // nothing rather than guess" instruction. The page-extraction calls keep it.
+        mockCreate.mockResolvedValueOnce(json(JSON.stringify({ competitors: [] })));
+
+        await seedCompetitors('mine.com', 20);
+
+        expect(mockCreate.mock.calls[0][0].messages[0].content).not.toContain('web page');
+    });
+
     it('returns an empty array when the model returns nothing usable', async () => {
         mockCreate.mockResolvedValueOnce(json(JSON.stringify({ competitors: [{ name: 'Bad', domain: '' }] })));
 

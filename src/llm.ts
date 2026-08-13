@@ -78,6 +78,7 @@ async function completeJson<T>(prompt: string, schema: z.ZodSchema<T>, system: s
     return null;
 }
 
+/** For the calls that really are page extraction — `extractNames` and `isListPage`. */
 const EXTRACT_SYSTEM = 'You extract structured data from web pages. Reply with JSON only.';
 
 const CompetitorsSchema = z.object({
@@ -120,7 +121,12 @@ integrate with it rather than competing with it.
 
 Reply as {"competitors": [{"name": "...", "domain": "..."}]}`,
         CompetitorsSchema,
-        EXTRACT_SYSTEM,
+        // Its own system string, not `EXTRACT_SYSTEM`: there is no page in this call at all.
+        // Telling the model it is extracting structured data from a web page describes the
+        // opposite of the job — recalling companies from its own knowledge — and the honest
+        // framing is also what makes the "say nothing rather than guess" instruction above
+        // coherent. `describeCandidates` does the same for the same reason.
+        'You name companies from your own knowledge of a market. Reply with JSON only.',
     );
 
     if (!result) return [];
