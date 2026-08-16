@@ -1,2 +1,6 @@
 .prettierignore
 pnpm-lock.yaml
+
+# Completed process artifacts — a spec and a verification plan, both finished. Reformatting
+# them rewrites a historical record for no gain, so they are checked in as they were written.
+docs/superpowers/

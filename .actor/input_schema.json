@@ -28,31 +28,6 @@
             "editor": "stringList",
             "default": [],
             "prefill": []
-        },
-        "directories": {
-            "title": "Integration directories",
-            "type": "array",
-            "description": "Large directories to harvest names from. Leave empty to use the seven verified defaults shown here; override to target a different ecosystem. Changing this list makes the next run a fresh baseline rather than a NEW/SEEN diff, because it changes what the run looks at.",
-            "editor": "stringList",
-            "default": [],
-            "prefill": [
-                "https://n8n.io/integrations/",
-                "https://zapier.com/apps",
-                "https://www.make.com/en/integrations",
-                "https://pipedream.com/apps",
-                "https://python.langchain.com/docs/integrations/providers/",
-                "https://docs.llamaindex.ai/en/stable/module_guides/loading/connector/modules/",
-                "https://smithery.ai/"
-            ]
-        },
-        "minSources": {
-            "title": "Minimum sources per candidate",
-            "type": "integer",
-            "description": "Only report a name carried by at least this many sources. Raise it to cut noise.",
-            "editor": "number",
-            "default": 2,
-            "minimum": 1,
-            "maximum": 10
         }
     },
     "required": ["companyDomain"]

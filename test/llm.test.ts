@@ -96,7 +96,9 @@ describe('seedCompetitors', () => {
     // away with it.
     it('retries once on an unparseable response and returns the second attempt', async () => {
         mockCreate.mockResolvedValueOnce(json('not json at all'));
-        mockCreate.mockResolvedValueOnce(json(JSON.stringify({ competitors: [{ name: 'Weaviate', domain: 'weaviate.io' }] })));
+        mockCreate.mockResolvedValueOnce(
+            json(JSON.stringify({ competitors: [{ name: 'Weaviate', domain: 'weaviate.io' }] })),
+        );
 
         const result = await seedCompetitors('mine.com', 20);
 
@@ -106,7 +108,9 @@ describe('seedCompetitors', () => {
 
     it('retries once on a schema-invalid response (wrong shape, still valid JSON)', async () => {
         mockCreate.mockResolvedValueOnce(json(JSON.stringify({ competitors: 'not-an-array' })));
-        mockCreate.mockResolvedValueOnce(json(JSON.stringify({ competitors: [{ name: 'Weaviate', domain: 'weaviate.io' }] })));
+        mockCreate.mockResolvedValueOnce(
+            json(JSON.stringify({ competitors: [{ name: 'Weaviate', domain: 'weaviate.io' }] })),
+        );
 
         const result = await seedCompetitors('mine.com', 20);
 
@@ -215,7 +219,7 @@ describe('isListPage', () => {
 
 describe('describeCandidates', () => {
     function candidate(slug: string, name = slug): RawCandidate {
-        return { candidate: name, slug, peerCount: 1, directoryCount: 0, carriedBy: ['x'] };
+        return { candidate: name, slug, competitorCount: 1, carriedBy: ['x'] };
     }
 
     it('returns an empty map without calling the LLM for an empty candidate list', async () => {
@@ -227,7 +231,11 @@ describe('describeCandidates', () => {
 
     it('builds a map keyed by slug from a well-formed response', async () => {
         mockCreate.mockResolvedValueOnce(
-            json(JSON.stringify({ described: [{ slug: 'weaviate', category: 'vector-database', description: 'A vector database.' }] })),
+            json(
+                JSON.stringify({
+                    described: [{ slug: 'weaviate', category: 'vector-database', description: 'A vector database.' }],
+                }),
+            ),
         );
 
         const result = await describeCandidates([candidate('weaviate', 'Weaviate')]);

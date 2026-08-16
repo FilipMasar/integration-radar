@@ -16,27 +16,24 @@ interface RagItem {
     searchResult?: { url?: string };
 }
 
-/**
- * `key` is the cache record this page lives in. Callers need it to attach the extracted
- * names to the same record — it cannot be derived from `hit.url`, because a page found
- * via search is stored under the search key, not its own URL.
- */
 export interface Resolved {
     hit: PageHit | null;
     fromCache: boolean;
+    /**
+     * The cache record this page lives in. Callers need it to attach extracted names to
+     * the same record; it cannot be derived from `hit.url`, because a page found via
+     * search is stored under the search key, not its own URL.
+     */
     key: string;
     /**
-     * Which tier produced the hit. Added 2026-08-12; two separate needs converged on it.
-     * (1) Task 5's `isListPage` gate runs on search hits only — path hits are deterministic.
-     * (2) NEW/SEEN: a path guess resolves to the same URL every run, a search does not
-     *     (brightdata.com resolved to two different URLs on two consecutive runs), so a
-     *     `NEW` finding sourced from a search hit is weaker evidence and must be flagged
-     *     rather than reported with the same confidence.
+     * Which tier produced the hit. The `isListPage` gate runs on search hits only, and a
+     * `NEW` finding sourced from a search hit is weaker evidence — a path guess resolves to
+     * the same URL every run, a search does not (`brightdata.com` resolved to two different
+     * URLs on consecutive runs).
      *
      * **`tier` describes which mechanism ran, not whether it succeeded — always check
-     * `hit !== null` first.** `findIntegrations` returns `null` when nothing resolved, but
-     * `fetchUrl` returns `'path'` even on its give-up path, because the path tier is the
-     * only mechanism it has. Reading `tier` alone as a success signal is wrong.
+     * `hit !== null` first.** `fetchUrl` returns `'path'` even when it gives up, because
+     * the path tier is the only mechanism it has.
      */
     tier: 'path' | 'search' | null;
 }
@@ -50,13 +47,11 @@ async function runRagBrowser(query: string, render: boolean, maxResults: number)
             outputFormats: ['markdown'],
             scrapingTool: render ? 'browser-playwright' : 'raw-http',
         },
-        // The timeout bounds the damage of a hang; the memory addresses its cause.
-        // Both live Playwright renders in verification logged "Memory is critically
-        // overloaded. Using 976 MB of 1024 MB (95%)" — almost certainly the actual
-        // mechanism behind the ~157s pipedream.com/apps hang that motivated the
-        // timeout in the first place, not an unrelated fluke. Only the retry path
-        // (render === true) pays the higher rate; raw-http fetches, which are cheap
-        // and never approach that ceiling, stay at 1024 MB.
+        // The timeout bounds the damage of a hang; the memory addresses its cause. Both
+        // live Playwright renders logged "Memory is critically overloaded (95%)", almost
+        // certainly the mechanism behind the ~157s pipedream.com/apps hang that motivated
+        // the timeout. Only the retry path pays the higher rate; raw-http fetches are cheap
+        // and never approach that ceiling.
         render ? { memory: 4096, timeout: 180 } : { memory: 1024, timeout: 60 },
     );
     const { items } = await client.dataset(run.defaultDatasetId).listItems();
@@ -79,9 +74,9 @@ export function isThin(hit: PageHit | null): boolean {
 }
 
 /**
- * Fetch one URL as Markdown, cheap engine first. If the raw fetch comes back thin,
- * retry once with a real browser — zyte.com/integrations returns HTTP 200 with zero
- * visible text on a plain fetch, and several directories are the same.
+ * Fetch one URL as Markdown, cheap engine first. If the raw fetch comes back thin, retry
+ * once with a real browser — `zyte.com/integrations` returns HTTP 200 with zero visible
+ * text on a plain fetch, and it was not the only competitor page that did.
  */
 export async function fetchUrl(url: string): Promise<Resolved> {
     const key = cacheKey('page', url);
@@ -91,27 +86,18 @@ export async function fetchUrl(url: string): Promise<Resolved> {
         return { hit: cached, fromCache: true, key, tier: 'path' };
     }
 
-    // Skip straight past a domain that failed both engines recently — this also
-    // covers Task 6's fixed directory URLs, not just findIntegrations' own callers.
     if (await readMiss(key)) {
         return { hit: null, fromCache: true, key, tier: 'path' };
     }
 
-    // A miss may only be recorded once the render attempt — the final, most capable
-    // engine in the loop — has itself completed and come back unusable. Tracking
-    // "at least one attempt completed" is not tight enough: it would let a
-    // completed-but-thin raw-http result justify a miss even when the render retry
-    // itself threw and never got to run, resting the miss on the weaker engine's
-    // result while the stronger, more dispositive one produced no information at
-    // all. Render is also the resource-heavy call (still capped at 4096MB/180s)
-    // far more likely to time out or OOM in practice than the cheap raw-http pass,
-    // so "raw completed thin, render threw" is the operationally relevant ordering,
-    // not an edge case. Resetting this flag at the top of every iteration means
-    // that after the loop it reflects only the *last* (render) attempt's outcome —
-    // an exception on either attempt is an absence of information, not evidence of
-    // absence, and this project has already lived through exactly that failure mode
-    // once (an entire session where every child call failed with "x402 payment
-    // header missing" because the token wasn't loaded).
+    // A miss may only be recorded once the render attempt — the final, most capable engine
+    // — has itself completed and come back unusable. "At least one attempt completed" is
+    // not tight enough: it would let a thin raw-http result justify a miss even when the
+    // render retry threw and never ran, resting the miss on the weaker engine while the
+    // more dispositive one produced no information at all. Render is also the call far more
+    // likely to time out or OOM, so "raw completed thin, render threw" is the operationally
+    // relevant ordering. Resetting the flag each iteration means it reflects only the last
+    // attempt: an exception is an absence of information, not evidence of absence.
     let finalAttemptCompleted = false;
     for (const render of [false, true]) {
         finalAttemptCompleted = false;
@@ -126,9 +112,8 @@ export async function fetchUrl(url: string): Promise<Resolved> {
             }
             log.info('Thin result', { url, render, chars: hit?.markdown.length ?? 0 });
         } catch (err) {
-            // A thrown error here is ambiguous: a bad token and a missing page look
-            // identical downstream, so log loudly rather than swallowing silently.
-            // It must NOT leave `finalAttemptCompleted` set — see the comment above.
+            // A bad token and a missing page look identical downstream, so log loudly
+            // rather than swallowing. Must NOT leave `finalAttemptCompleted` set.
             log.warning('Fetch error', { url, render, error: (err as Error).message });
         }
     }
@@ -140,33 +125,26 @@ export async function fetchUrl(url: string): Promise<Resolved> {
 export const ARTICLE_RE = /\/(blog|news|post|posts|article|guides?|changelog|docs\/[^/]*tutorial)\//i;
 
 /**
- * Whether a fetched page is actually the list it claims to be, not a homepage, an
- * article that happens to mention the keyword, or a thin shell. Requiring the keyword at
- * all is what rejects a homepage served from `/integrations/` — ScraperAPI does exactly
- * this. Exported, and taking `keyword` as a plain argument rather than reading it from
- * the caller's scope, so it's unit-testable on its own.
+ * Whether a fetched page is actually the list it claims to be, rather than a homepage, an
+ * article mentioning the keyword, or a thin shell. Requiring the keyword is what rejects a
+ * homepage served from `/integrations/` — ScraperAPI does exactly this. Takes `keyword` as
+ * an argument rather than reading it from the caller's scope so it is testable alone.
  */
 export function looksRight(hit: PageHit | null, keyword: string): hit is PageHit {
     return !isThin(hit) && hit!.markdown.toLowerCase().includes(keyword) && !ARTICLE_RE.test(hit!.url);
 }
 
 /**
- * One path guess, then a site-scoped search. The guess is cheap and deterministic;
- * the search covers every naming variant without us enumerating them.
- *
- * An llms.txt tier was designed and cut (an extra fetch on every miss to save a search
- * on ~1 domain in 7), as was a five-path guess list (a failed fetch costs the same as a
- * successful one, so five guesses cost more than the search they were avoiding).
+ * One path guess, then a site-scoped search. The guess is cheap and deterministic; the
+ * search covers every naming variant without us enumerating them.
  */
 export async function findIntegrations(domain: string): Promise<Resolved> {
     const keyword = 'integrat';
-    // Unchanged key format: `search-{domain}-integrations`. Existing stored records for
-    // this domain must keep hitting, so this string is not a free choice.
+    // This key format is not a free choice — existing stored records must keep hitting.
     const key = cacheKey('search', `${domain}-integrations`);
 
-    // Checked before the path guess even runs, so a domain already known to have
-    // neither a guessable page nor a findable one via search costs zero child calls
-    // on this run, not just a cheaper miss on the search tier alone.
+    // Checked before the path guess, so a domain known to have neither a guessable nor a
+    // findable page costs zero child calls rather than just a cheaper search-tier miss.
     if (await readMiss(key)) {
         return { hit: null, fromCache: true, key, tier: null };
     }
@@ -180,9 +158,8 @@ export async function findIntegrations(domain: string): Promise<Resolved> {
     const cached = await readCache(key);
     if (cached) return { hit: cached, fromCache: true, key, tier: 'search' };
 
-    // Same rule as fetchUrl: only a search that actually completed and found nothing
-    // usable counts as a miss. A thrown search (auth, network, the child Actor
-    // itself failing) must leave no marker — see fetchUrl's comment for why.
+    // Same rule as `fetchUrl`: only a search that completed and found nothing counts as a
+    // miss. A thrown search must leave no marker.
     let searchCompleted = false;
     try {
         // Two results, not one: the top hit is sometimes an article rather than the list.

@@ -1,47 +1,47 @@
 {
-	"name": "integration-radar",
-	"version": "0.0.1",
-	"type": "module",
-	"description": "Finds integrations a company's competitors and the wider ecosystem have but it does not, and tags what is new since the last run.",
-	"packageManager": "pnpm@10.28.0",
-	"engines": {
-		"node": ">=22.0.0"
-	},
-	"dependencies": {
-		"apify": "^3.7.0",
-		"openai": "^7.4.0",
-		"zod": "^4.4.3"
-	},
-	"devDependencies": {
-		"@apify/eslint-config": "^2.0.0",
-		"@apify/tsconfig": "^0.2.0",
-		"@types/node": "^24.0.0",
-		"eslint": "^9.29.0",
-		"eslint-config-prettier": "^10.1.5",
-		"globals": "^17.0.0",
-		"prettier": "^3.5.3",
-		"tsx": "^4.20.3",
-		"typescript": "^6.0.0",
-		"typescript-eslint": "^8.58.0",
-		"vitest": "^4.1.0"
-	},
-	"scripts": {
-		"start": "pnpm run start:dev",
-		"start:prod": "node dist/main.js",
-		"start:dev": "tsx src/main.ts",
-		"build": "tsc",
-		"lint": "eslint",
-		"lint:fix": "eslint --fix",
-		"format": "prettier --write .",
-		"format:check": "prettier --check .",
-		"test": "vitest run"
-	},
-	"author": "Filip Masar <filip.masar@apify.com>",
-	"license": "ISC",
-	"pnpm": {
-		"onlyBuiltDependencies": [
-			"esbuild",
-			"unrs-resolver"
-		]
-	}
+    "name": "integration-radar",
+    "version": "0.0.1",
+    "type": "module",
+    "description": "Finds integrations a company's competitors and the wider ecosystem have but it does not, and tags what is new since the last run.",
+    "packageManager": "pnpm@10.28.0",
+    "engines": {
+        "node": ">=22.0.0"
+    },
+    "dependencies": {
+        "apify": "^3.7.0",
+        "openai": "^7.4.0",
+        "zod": "^4.4.3"
+    },
+    "devDependencies": {
+        "@apify/eslint-config": "^2.0.0",
+        "@apify/tsconfig": "^0.2.0",
+        "@types/node": "^24.0.0",
+        "eslint": "^9.29.0",
+        "eslint-config-prettier": "^10.1.5",
+        "globals": "^17.0.0",
+        "prettier": "^3.5.3",
+        "tsx": "^4.20.3",
+        "typescript": "^6.0.0",
+        "typescript-eslint": "^8.58.0",
+        "vitest": "^4.1.0"
+    },
+    "scripts": {
+        "start": "pnpm run start:dev",
+        "start:prod": "node dist/main.js",
+        "start:dev": "tsx src/main.ts",
+        "build": "tsc",
+        "lint": "eslint",
+        "lint:fix": "eslint --fix",
+        "format": "prettier --write .",
+        "format:check": "prettier --check .",
+        "test": "vitest run"
+    },
+    "author": "Filip Masar <filip.masar@apify.com>",
+    "license": "ISC",
+    "pnpm": {
+        "onlyBuiltDependencies": [
+            "esbuild",
+            "unrs-resolver"
+        ]
+    }
 }

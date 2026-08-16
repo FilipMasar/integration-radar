@@ -101,7 +101,10 @@ beforeEach(() => {
 
 describe('fetchUrl miss recording', () => {
     it('does NOT write a miss when every engine attempt throws', async () => {
-        outcomes = [{ throws: new Error('x402 payment header missing') }, { throws: new Error('x402 payment header missing') }];
+        outcomes = [
+            { throws: new Error('x402 payment header missing') },
+            { throws: new Error('x402 payment header missing') },
+        ];
 
         const result = await fetchUrl('https://example.com/integrations');
 
@@ -159,7 +162,11 @@ describe('findIntegrations miss recording', () => {
     it('does NOT write a search-tier miss when the search attempt throws', async () => {
         // Path guess: both engine attempts come back thin (completed, not matching).
         // Search: throws.
-        outcomes = [{ items: [{ markdown: 'short' }] }, { items: [{ markdown: 'short' }] }, { throws: new Error('network blip') }];
+        outcomes = [
+            { items: [{ markdown: 'short' }] },
+            { items: [{ markdown: 'short' }] },
+            { throws: new Error('network blip') },
+        ];
 
         const result = await findIntegrations('example.com');
 
@@ -242,7 +249,10 @@ describe('Resolved.tier', () => {
             { items: [{ markdown: 'short' }] }, // path guess render retry: thin
             {
                 items: [
-                    { markdown: 'no relevant keyword here, just filler content', metadata: { url: 'https://example.com/blog/x' } },
+                    {
+                        markdown: 'no relevant keyword here, just filler content',
+                        metadata: { url: 'https://example.com/blog/x' },
+                    },
                 ],
             }, // search: completes, finds nothing usable
         ];

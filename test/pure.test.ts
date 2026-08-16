@@ -60,9 +60,7 @@ describe('diffAgainstPrevious', () => {
 });
 
 describe('sourceName', () => {
-    it('reduces a directory URL and a competitor domain to the same namespace', () => {
-        // The collision that made `zapier.com` count twice toward minSources: one code
-        // path minted `new URL(url).hostname`, the other `competitor.domain`.
+    it('reduces a full URL and a bare domain to the same name', () => {
         expect(sourceName('https://zapier.com/apps')).toBe('zapier.com');
         expect(sourceName('zapier.com')).toBe('zapier.com');
     });
@@ -117,99 +115,76 @@ describe('normalizeCompetitors', () => {
 
 describe('rankCandidates', () => {
     const sources = [
-        { name: 'a.com', kind: 'peer' as const, names: ['two-source', 'one-source'] },
-        { name: 'b.com', kind: 'peer' as const, names: ['two-source'] },
+        { name: 'a.com', names: ['two-source', 'one-source'] },
+        { name: 'b.com', names: ['two-source'] },
     ];
 
-    it('keeps candidates below any threshold — it is the memory pool', () => {
-        // The bug: applying `minSources` before memory is computed. A user who raises
-        // minSources to 3 and back to 2 (the README recommends the tuning) would then
-        // get every 2-source candidate back as fabricated NEW.
+    it('keeps a candidate carried by a single competitor — there is no evidence threshold', () => {
         expect(rankCandidates([], sources).map((c) => c.slug)).toEqual(['two-source', 'one-source']);
     });
 
     const mixedSources = [
-        { name: 'firecrawl.dev', kind: 'peer' as const, names: ['Weaviate', 'Slack', 'API'] },
-        { name: 'zyte.com', kind: 'peer' as const, names: ['Weaviate'] },
-        { name: 'n8n.io', kind: 'directory' as const, names: ['Weaviate', 'Clay'] },
+        { name: 'firecrawl.dev', names: ['Weaviate', 'Slack', 'API'] },
+        { name: 'zyte.com', names: ['Weaviate'] },
+        { name: 'n8n.io', names: ['Weaviate', 'Clay'] },
     ];
 
     it('excludes generic stopwords that are not real integrations', () => {
         expect(rankCandidates([], mixedSources).map((c) => c.slug)).not.toContain('api');
     });
 
-    it('counts peers and directories separately, and cites every source in carriedBy', () => {
+    it('counts every competitor carrying a name and cites each one in carriedBy', () => {
         // `carriedBy` is the product's evidence field — the only thing a reader can check a
-        // row against — so both its multi-source content and its peers-then-directories
-        // ordering are pinned, not just its length.
+        // row against — so its content and order are pinned, not just its length.
         const [top] = rankCandidates([], mixedSources);
         expect(top.slug).toBe('weaviate');
-        expect(top.peerCount).toBe(2);
-        expect(top.directoryCount).toBe(1);
+        expect(top.competitorCount).toBe(3);
         expect(top.carriedBy).toEqual(['firecrawl.dev', 'zyte.com', 'n8n.io']);
     });
 
+    it('counts one competitor once however many times it repeats a name', () => {
+        const s = [{ name: 'a.com', names: ['Slack', 'Slack integration', 'slack'] }];
+        const [top] = rankCandidates([], s);
+        expect(top.competitorCount).toBe(1);
+        expect(top.carriedBy).toEqual(['a.com']);
+    });
+
     it('excludes candidates with cross-alias ownership normalization', () => {
-        const s = [{ name: 'x.com', kind: 'peer' as const, names: ['AWS S3'] }];
+        const s = [{ name: 'x.com', names: ['AWS S3'] }];
         expect(rankCandidates(['Amazon S3'], s)).toEqual([]);
     });
 
-    it('sorts by peer count first, ahead of any number of directories', () => {
+    it('sorts by competitor count, most-carried first', () => {
         const s = [
-            { name: 'a.com', kind: 'peer' as const, names: ['rare'] },
-            { name: 'b.com', kind: 'peer' as const, names: ['rare', 'common'] },
-            { name: 'd1.io', kind: 'directory' as const, names: ['common'] },
-            { name: 'd2.io', kind: 'directory' as const, names: ['common'] },
+            { name: 'a.com', names: ['rare'] },
+            { name: 'b.com', names: ['rare', 'common'] },
         ];
         expect(rankCandidates([], s).map((c) => c.slug)).toEqual(['rare', 'common']);
     });
 
-    it('breaks a peer-count tie on directory count', () => {
-        // The case the test above cannot reach: it gives 'rare' 2 peers against 'common''s
-        // 1, so the peer-count clause decides on its own and the directory-count clause is
-        // never consulted — deleting that clause leaves it green. Here both candidates have
-        // exactly one peer, so directory count is the only thing that can order them, and
-        // 'zzz-more-dirs' sorting first also rules out the alphabetical fallback doing it.
-        const s = [
-            { name: 'a.com', kind: 'peer' as const, names: ['zzz-more-dirs', 'aaa-fewer-dirs'] },
-            { name: 'd1.io', kind: 'directory' as const, names: ['zzz-more-dirs', 'aaa-fewer-dirs'] },
-            { name: 'd2.io', kind: 'directory' as const, names: ['zzz-more-dirs'] },
-        ];
+    it('breaks a count tie alphabetically, so the order is stable between runs', () => {
+        // Both have exactly one competitor, so only the tiebreak can order them. Deleting
+        // the `localeCompare` clause leaves insertion order, which is 'zzz' first — so this
+        // fails without it rather than passing by luck.
+        const s = [{ name: 'a.com', names: ['zzz-last', 'aaa-first'] }];
         const ranked = rankCandidates([], s);
-        expect(ranked.map((c) => c.peerCount)).toEqual([1, 1]);
-        expect(ranked.map((c) => c.slug)).toEqual(['zzz-more-dirs', 'aaa-fewer-dirs']);
+        expect(ranked.map((c) => c.competitorCount)).toEqual([1, 1]);
+        expect(ranked.map((c) => c.slug)).toEqual(['aaa-first', 'zzz-last']);
     });
 });
 
 describe('inputFingerprint', () => {
-    const base = { companyDomain: 'apify.com', maxCompetitors: 20, directories: ['https://zapier.com/apps'] };
-
-    it('is stable across reordering and trailing-slash differences in directories', () => {
-        const one = inputFingerprint({ ...base, directories: ['https://a.com/x/', 'https://b.com/y'] });
-        const two = inputFingerprint({ ...base, directories: ['https://b.com/y', 'https://A.com/x'] });
-        expect(one).toBe(two);
-    });
+    const base = { companyDomain: 'apify.com', maxCompetitors: 20 };
 
     it('changes when maxCompetitors changes', () => {
         expect(inputFingerprint({ ...base, maxCompetitors: 10 })).not.toBe(inputFingerprint(base));
     });
 
-    it('changes when the directory list changes', () => {
-        expect(inputFingerprint({ ...base, directories: ['https://n8n.io/integrations/'] })).not.toBe(
-            inputFingerprint(base),
-        );
-    });
-
-    it('does NOT depend on minSources — memory holds the unfiltered pool, so it cannot move a slug', () => {
-        // Guards against someone "helpfully" adding minSources to the fingerprint: that
-        // would force a pointless BASELINE run every time a user turns the noise knob.
-        const loose = { ...base, minSources: 2 };
-        const strict = { ...base, minSources: 9 };
-        expect(inputFingerprint(loose)).toBe(inputFingerprint(strict));
+    it('normalizes the company domain, so www and casing are not a different question', () => {
+        expect(inputFingerprint({ ...base, companyDomain: 'https://WWW.Apify.com/' })).toBe(inputFingerprint(base));
     });
 
     it('changes when a competitor set is present at all', () => {
-        const base = { companyDomain: 'mine.com', maxCompetitors: 20, directories: ['https://d.io'] };
         expect(inputFingerprint({ ...base, competitors: ['rival.com'] })).not.toBe(inputFingerprint(base));
     });
 
@@ -217,21 +192,18 @@ describe('inputFingerprint', () => {
         // The field carries the set the run *effectively reads* (see the call site in
         // orchestrate.ts), so two same-length sets that differ by one entry are two different
         // questions and the next run must not diff one against the other.
-        const base = { companyDomain: 'mine.com', maxCompetitors: 2, directories: ['https://d.io'] };
         expect(inputFingerprint({ ...base, competitors: ['a.com', 'b.com'] })).not.toBe(
             inputFingerprint({ ...base, competitors: ['a.com', 'c.com'] }),
         );
     });
 
     it('does not change when the same competitors are reordered or duplicated', () => {
-        const base = { companyDomain: 'mine.com', maxCompetitors: 20, directories: ['https://d.io'] };
         expect(inputFingerprint({ ...base, competitors: ['a.com', 'b.com'] })).toBe(
             inputFingerprint({ ...base, competitors: ['b.com', 'a.com', 'a.com'] }),
         );
     });
 
     it('normalizes competitor spellings, so www and casing are not a different question', () => {
-        const base = { companyDomain: 'mine.com', maxCompetitors: 20, directories: ['https://d.io'] };
         expect(inputFingerprint({ ...base, competitors: ['https://www.A.com/x'] })).toBe(
             inputFingerprint({ ...base, competitors: ['a.com'] }),
         );
@@ -242,7 +214,11 @@ describe('mergeMemory', () => {
     const mem = (slugs: string[], sources: string[]) => ({ slugs, sources });
 
     it('replaces memory when this run covered every source memory rests on', () => {
-        const { memory, replaced } = mergeMemory(mem(['a', 'b'], ['x.com']), mem(['b', 'c'], ['x.com', 'y.com']), false);
+        const { memory, replaced } = mergeMemory(
+            mem(['a', 'b'], ['x.com']),
+            mem(['b', 'c'], ['x.com', 'y.com']),
+            false,
+        );
         expect(replaced).toBe(true);
         expect(memory.slugs).toEqual(['b', 'c']); // 'a' genuinely disappeared and drops out
     });
@@ -259,7 +235,7 @@ describe('mergeMemory', () => {
 
     it('unions when a source was never attempted, not merely unresolved', () => {
         // THE critical hole: a competitor dropped before the resolution loop (model
-        // nondeterminism, a maxCompetitors cut, a shorter directories list) never shows
+        // nondeterminism, a maxCompetitors cut, an edited competitors list) never shows
         // up as an unresolved entry, so the old coverage-flag gate read "complete" and
         // replaced memory. Comparing evidence bases sees it.
         const { memory, replaced } = mergeMemory(

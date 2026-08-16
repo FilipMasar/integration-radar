@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Company, PageHit } from '../src/pure.js';
-import { DEFAULT_DIRECTORIES, inputFingerprint } from '../src/pure.js';
+import { inputFingerprint } from '../src/pure.js';
 import type { StoredMemory } from '../src/store.js';
 import type { Resolved } from '../src/web.js';
 // Type-only import: erased at compile time, so it needs no involvement from the
@@ -36,25 +36,16 @@ function resolved(overrides: Partial<Resolved> = {}): Resolved {
     return { hit: hit('https://example.com/integrations'), fromCache: false, key: 'key', tier: 'path', ...overrides };
 }
 
-// A single fixed placeholder directory URL, always present in `Input`. Production's
-// `input.directories?.length ? input.directories : DEFAULT_DIRECTORIES` means an empty
-// array is not "no directories" — it means "use the real seven-URL default list" — so
-// these tests supply one explicit, controlled URL instead of coupling to that constant.
-const FAKE_DIRECTORY = 'https://dir.test/integrations';
-
 const BASE_INPUT: Input = {
     companyDomain: 'mine.com',
     maxCompetitors: 20,
-    directories: [FAKE_DIRECTORY],
-    minSources: 1,
 };
 
 /**
- * A minimal, fully-wired fake `Deps`: one competitor ("rival.com"), one directory (the
- * fixed placeholder above, unresolved by default so it never *accidentally* becomes a
- * source), every other call succeeds. Each test overrides only the handful of fields it
- * needs to exercise a specific behavior — the rest keep the pipeline running end to end
- * so the scenario under test isn't drowned in unrelated setup.
+ * A minimal, fully-wired fake `Deps`: one competitor ("rival.com"), every call succeeds.
+ * Each test overrides only the handful of fields it needs to exercise a specific behavior
+ * — the rest keep the pipeline running end to end so the scenario under test isn't
+ * drowned in unrelated setup.
  */
 function baseDeps(overrides: Partial<Deps> = {}): Deps {
     const ownHit = hit('https://mine.com/integrations');
@@ -66,10 +57,6 @@ function baseDeps(overrides: Partial<Deps> = {}): Deps {
             if (domain === 'rival.com') return resolved({ hit: rivalHit, key: 'rival' });
             return resolved({ hit: null, key: domain });
         }),
-        // Unresolved by default: a test that wants the directory to resolve and
-        // contribute a source overrides this explicitly, so its contribution is never
-        // accidental.
-        fetchUrl: vi.fn(async (): Promise<Resolved> => resolved({ hit: null, key: 'fake-directory' })),
         seedCompetitors: vi.fn(async (): Promise<Company[]> => [{ name: 'Rival', domain: 'rival.com' }]),
         extractNames: vi.fn(async (page: PageHit): Promise<string[]> => {
             if (page.url === ownHit.url) return ['Existing Thing'];
@@ -138,7 +125,8 @@ describe('runIntegrationRadar — requirement 1: gate search-tier hits, not path
             findIntegrations: vi.fn(async (domain: string): Promise<Resolved> => {
                 if (domain === 'mine.com') return resolved({ hit: ownHit, key: 'own', tier: 'path' });
                 if (domain === 'rival.com') return resolved({ hit: pathHit, key: 'rival', tier: 'path' });
-                if (domain === 'searchfound.com') return resolved({ hit: searchHit, key: 'search-hit', tier: 'search' });
+                if (domain === 'searchfound.com')
+                    return resolved({ hit: searchHit, key: 'search-hit', tier: 'search' });
                 return resolved({ hit: null, key: domain });
             }),
             extractNames: vi.fn(async (page: PageHit): Promise<string[]> => {
@@ -167,20 +155,25 @@ describe('runIntegrationRadar — requirement 1: gate search-tier hits, not path
         );
 
         const deps = baseDeps({
-            seedCompetitors: vi.fn(async (): Promise<Company[]> => [{ name: 'SearchFound', domain: 'searchfound.com' }]),
+            seedCompetitors: vi.fn(async (): Promise<Company[]> => [
+                { name: 'SearchFound', domain: 'searchfound.com' },
+            ]),
             findIntegrations: vi.fn(async (domain: string): Promise<Resolved> => {
                 if (domain === 'mine.com') {
                     return resolved({ hit: hit('https://mine.com/integrations'), key: 'own', tier: 'path' });
                 }
-                if (domain === 'searchfound.com') return resolved({ hit: searchHit, key: 'search-hit', tier: 'search' });
+                if (domain === 'searchfound.com')
+                    return resolved({ hit: searchHit, key: 'search-hit', tier: 'search' });
                 return resolved({ hit: null, key: domain });
             }),
             extractNames: extractNamesSpy,
             isListPage: vi.fn(async () => false), // the gate rejects it
         });
 
-        // No directories and the one competitor is gated out -> no sources at all.
-        await expect(runIntegrationRadar(BASE_INPUT, deps)).rejects.toThrow('No source lists could be read.');
+        // The one competitor is gated out, so nothing is left to compare against.
+        await expect(runIntegrationRadar(BASE_INPUT, deps)).rejects.toThrow(
+            'No competitor integrations pages could be read.',
+        );
         expect(extractNamesSpy).not.toHaveBeenCalledWith(searchHit);
     });
 });
@@ -246,12 +239,124 @@ describe('runIntegrationRadar — requirement 2: carry-forward on unresolved sou
     });
 });
 
+/**
+ * A competitor that *throws* and a competitor that resolves to nothing are the same
+ * real-world event — that source did not answer this run — but they reach the pipeline by
+ * different routes. `findIntegrations` and `extractNames` swallow their own failures, so the
+ * unguarded surface is the store: `readMiss`, `readCache`, `readNames`, `readListPageVerdict`.
+ * Without the try/catch in the `mapLimit` callback a single key-value API error rejects
+ * `Promise.all` and aborts the whole run *before* `pushData`, so the user pays for the seed,
+ * their own page and every competitor already read, and receives nothing.
+ *
+ * Both tests below therefore assert more than "it did not throw": they pin that the failure
+ * lands in the carry-forward path built for an unresolved source, which is the behavior that
+ * makes swallowing it correct rather than merely convenient.
+ */
+describe('runIntegrationRadar — one competitor failing must not fail the run', () => {
+    /** Memory resting on both competitors, so the carry-forward rule is actually exercised. */
+    const twoSourceMemory = () =>
+        storedMemoryFor(['ok.com', 'flaky.com'], ['flaky-only-candidate', 'stable-candidate'], ['ok.com', 'flaky.com']);
+
+    const twoCompetitors = vi.fn(async (): Promise<Company[]> => [
+        { name: 'Ok', domain: 'ok.com' },
+        { name: 'Flaky', domain: 'flaky.com' },
+    ]);
+
+    it('skips a competitor whose page lookup throws, and still reports the others', async () => {
+        vi.mocked(log.warning).mockClear();
+        const okHit = hit('https://ok.com/integrations');
+        const savePreviousSpy = vi.fn(async () => undefined);
+        const pushDataSpy = vi.fn(async () => undefined);
+
+        const deps = baseDeps({
+            savePrevious: savePreviousSpy,
+            pushData: pushDataSpy,
+            seedCompetitors: twoCompetitors,
+            loadPrevious: vi.fn(async () => twoSourceMemory()),
+            findIntegrations: vi.fn(async (domain: string): Promise<Resolved> => {
+                if (domain === 'mine.com') return resolved({ hit: hit('https://mine.com/integrations'), key: 'own' });
+                if (domain === 'ok.com') return resolved({ hit: okHit, key: 'ok' });
+                // What a 500 from the key-value store looks like from here: readMiss/readCache
+                // are the first thing findIntegrations does, and neither is guarded.
+                if (domain === 'flaky.com') throw new Error('key-value store request failed with status 500');
+                return resolved({ hit: null, key: domain });
+            }),
+            extractNames: vi.fn(async (page: PageHit): Promise<string[]> => {
+                if (page.url.includes('mine.com')) return ['Existing Thing'];
+                if (page.url === okHit.url) return ['Stable Candidate'];
+                return [];
+            }),
+        });
+
+        const summary = await runIntegrationRadar(BASE_INPUT, deps);
+
+        // The surviving competitor's work is delivered — the point of not aborting.
+        expect(pushDataSpy).toHaveBeenCalledTimes(1);
+        expect(summary.rows.map((r) => r.slug)).toContain('stable-candidate');
+
+        // And the thrower is treated as an unresolved source, not as a source that answered
+        // "nothing": memory is unioned rather than superseded, so the candidate only
+        // flaky.com carries survives and cannot come back as NEW next run.
+        expect(summary.memoryReplaced).toBe(false);
+        const [, saved] = savePreviousSpy.mock.calls[0];
+        expect(saved.slugs).toContain('flaky-only-candidate');
+
+        expect(log.warning).toHaveBeenCalledWith('Competitor failed — skipping it, not the run', {
+            domain: 'flaky.com',
+            error: 'key-value store request failed with status 500',
+        });
+    });
+
+    it('skips a competitor that throws after its page resolved, when the names read fails', async () => {
+        const okHit = hit('https://ok.com/integrations');
+        const flakyHit = hit('https://flaky.com/integrations');
+        const savePreviousSpy = vi.fn(async () => undefined);
+
+        const deps = baseDeps({
+            savePrevious: savePreviousSpy,
+            seedCompetitors: twoCompetitors,
+            loadPrevious: vi.fn(async () => twoSourceMemory()),
+            findIntegrations: vi.fn(async (domain: string): Promise<Resolved> => {
+                if (domain === 'mine.com') return resolved({ hit: hit('https://mine.com/integrations'), key: 'own' });
+                if (domain === 'ok.com') return resolved({ hit: okHit, key: 'ok' });
+                if (domain === 'flaky.com') return resolved({ hit: flakyHit, key: 'flaky' });
+                return resolved({ hit: null, key: domain });
+            }),
+            // Throws only for flaky.com's record, and only after its page resolved cleanly.
+            // A try/catch wrapping just the findIntegrations call would let this one through.
+            readNames: vi.fn(async (key: string) => {
+                if (key === 'flaky') throw new Error('key-value store request failed with status 503');
+                return null;
+            }),
+            extractNames: vi.fn(async (page: PageHit): Promise<string[]> => {
+                if (page.url.includes('mine.com')) return ['Existing Thing'];
+                if (page.url === okHit.url) return ['Stable Candidate'];
+                return ['Never Reached'];
+            }),
+        });
+
+        const summary = await runIntegrationRadar(BASE_INPUT, deps);
+
+        expect(summary.rows.map((r) => r.slug)).toContain('stable-candidate');
+        expect(summary.rows.map((r) => r.slug)).not.toContain('never-reached');
+        expect(summary.memoryReplaced).toBe(false);
+        const [, saved] = savePreviousSpy.mock.calls[0];
+        expect(saved.slugs).toContain('flaky-only-candidate');
+    });
+});
+
 describe('runIntegrationRadar — critical fix: the display cap must not truncate memory', () => {
     it('carries every ranked candidate into memory even when maxRows truncates what is displayed', async () => {
         const rivalHit = hit('https://rival.com/integrations');
-        // Five distinct candidates, all carried by the same single source, so all tie at
-        // peerCount 1 / directoryCount 0 and rankCandidates sorts them alphabetically by slug.
-        const fiveNames = ['Candidate Alpha', 'Candidate Bravo', 'Candidate Charlie', 'Candidate Delta', 'Candidate Echo'];
+        // Five distinct candidates, all carried by the same single competitor, so all tie
+        // at competitorCount 1 and rankCandidates sorts them alphabetically by slug.
+        const fiveNames = [
+            'Candidate Alpha',
+            'Candidate Bravo',
+            'Candidate Charlie',
+            'Candidate Delta',
+            'Candidate Echo',
+        ];
 
         const savePreviousSpy = vi.fn(async (_domain: string, _memory: StoredMemory) => undefined);
         const pushDataSpy = vi.fn(async () => undefined);
@@ -260,13 +365,10 @@ describe('runIntegrationRadar — critical fix: the display cap must not truncat
             maxRows: 2, // force truncation with a small, fast-to-verify pool
             savePrevious: savePreviousSpy,
             pushData: pushDataSpy,
-            // The fixed directory resolves too, not just the competitor — override the
-            // default "unresolved" fetchUrl explicitly.
-            fetchUrl: vi.fn(async (url: string): Promise<Resolved> => resolved({ hit: hit(url), key: url })),
             extractNames: vi.fn(async (page: PageHit): Promise<string[]> => {
                 if (page.url === rivalHit.url) return fiveNames;
-                // The own page and the directory both just echo what the company
-                // already has, so both resolve without adding candidates.
+                // The own page just echoes what the company already has, so it resolves
+                // without adding candidates.
                 return ['Existing Thing'];
             }),
         });
@@ -288,17 +390,15 @@ describe('runIntegrationRadar — critical fix: the display cap must not truncat
         expect(savePreviousSpy).toHaveBeenCalledTimes(1);
         const [, saved] = savePreviousSpy.mock.calls[0];
         expect(saved.slugs).toHaveLength(5);
+        // `totalRanked` reports the untruncated pool, so a reader can see that the
+        // displayed rows are a slice rather than the whole answer.
+        expect(summary.totalRanked).toBe(5);
     });
 
-    it('remembers candidates below minSources, so raising the knob cannot fabricate NEW', async () => {
-        // Two competitors: one carries both candidates, the other only 'shared'. At
-        // minSources 2, 'lonely' is not displayed — but it must still be remembered,
-        // because the README tells users to raise and lower this knob and a filtered
-        // memory turns that into a wave of fabricated NEW on the next run.
-        const savePreviousSpy = vi.fn(async (_domain: string, _memory: StoredMemory) => undefined);
-
+    it('reports a candidate carried by a single competitor — there is no evidence threshold', async () => {
+        // Two competitors: one carries both candidates, the other only 'shared'. Both are
+        // reported; 'lonely' resting on one page is a real signal, not noise to suppress.
         const deps = baseDeps({
-            savePrevious: savePreviousSpy,
             seedCompetitors: vi.fn(async (): Promise<Company[]> => [
                 { name: 'A', domain: 'a.com' },
                 { name: 'B', domain: 'b.com' },
@@ -316,11 +416,10 @@ describe('runIntegrationRadar — critical fix: the display cap must not truncat
             }),
         });
 
-        const summary = await runIntegrationRadar({ ...BASE_INPUT, minSources: 2 }, deps);
+        const summary = await runIntegrationRadar(BASE_INPUT, deps);
 
-        expect(summary.rows.map((r) => r.slug)).toEqual(['shared']); // 'lonely' is filtered from display
-        const [, saved] = savePreviousSpy.mock.calls[0];
-        expect(saved.slugs).toContain('lonely'); // ...but not from memory
+        expect(summary.rows.map((r) => r.slug)).toEqual(['shared', 'lonely']);
+        expect(summary.rows.map((r) => r.competitorCount)).toEqual([2, 1]);
     });
 });
 
@@ -377,12 +476,13 @@ describe('runIntegrationRadar — memory describes the conditions it was gathere
         const savePreviousSpy = vi.fn(async (_domain: string, _memory: StoredMemory) => undefined);
         const deps = baseDeps({
             savePrevious: savePreviousSpy,
-            fetchUrl: vi.fn(async (url: string): Promise<Resolved> => resolved({ hit: hit(url), key: url })),
             extractNames: vi.fn(async (page: PageHit): Promise<string[]> =>
                 page.url.includes('rival.com') ? ['Candidate One'] : ['Existing Thing'],
             ),
+            // `departed.com` is the ONLY source in the basis this run does not cover, so the
+            // assertion below can only be satisfied by the superset test noticing it.
             loadPrevious: vi.fn(async () =>
-                storedMemory(['candidate-one', 'gone-with-departed'], ['rival.com', 'departed.com', 'dir.test']),
+                storedMemory(['candidate-one', 'gone-with-departed'], ['rival.com', 'departed.com']),
             ),
         });
 
@@ -398,11 +498,12 @@ describe('runIntegrationRadar — memory describes the conditions it was gathere
         const savePreviousSpy = vi.fn(async (_domain: string, _memory: StoredMemory) => undefined);
         const deps = baseDeps({
             savePrevious: savePreviousSpy,
-            fetchUrl: vi.fn(async (url: string): Promise<Resolved> => resolved({ hit: hit(url), key: url })),
             extractNames: vi.fn(async (page: PageHit): Promise<string[]> =>
                 page.url.includes('rival.com') ? ['Candidate One'] : ['Existing Thing'],
             ),
-            loadPrevious: vi.fn(async () => storedMemory(['candidate-one', 'really-gone'], ['rival.com', 'dir.test'])),
+            // Memory rests on `rival.com` alone, which this run resolves — so the basis is
+            // covered and the replace branch fires.
+            loadPrevious: vi.fn(async () => storedMemory(['candidate-one', 'really-gone'], ['rival.com'])),
         });
 
         const summary = await runIntegrationRadar(BASE_INPUT, deps);
@@ -484,11 +585,21 @@ describe('runIntegrationRadar — charging', () => {
         // `fromCache: true, hit: null` — a known miss. It resolved nothing, so there is
         // nothing to charge for, and the `hit` check must run before the cache check.
         const { deps, calls } = orderedDeps({
-            fetchUrl: vi.fn(async (): Promise<Resolved> => resolved({ hit: null, fromCache: true, key: 'dir' })),
+            seedCompetitors: vi.fn(async (): Promise<Company[]> => [
+                { name: 'Rival', domain: 'rival.com' },
+                { name: 'Missed', domain: 'missed.com' },
+            ]),
+            findIntegrations: vi.fn(async (domain: string): Promise<Resolved> => {
+                if (domain === 'mine.com') return resolved({ hit: hit('https://mine.com/integrations'), key: 'own' });
+                if (domain === 'rival.com') {
+                    return resolved({ hit: hit('https://rival.com/integrations'), key: 'rival' });
+                }
+                return resolved({ hit: null, fromCache: true, key: 'missed' });
+            }),
         });
 
         const summary = await runIntegrationRadar(BASE_INPUT, deps);
-        expect(summary.freshSources).toBe(2); // own + rival, not the missed directory
+        expect(summary.freshSources).toBe(2); // own + rival, not the cached miss
         expect(calls).toContain('charge:source-analyzed:2');
     });
 
@@ -603,7 +714,9 @@ describe('runIntegrationRadar — cache reuse at the orchestration layer', () =>
         const summary = await runIntegrationRadar(BASE_INPUT, deps);
 
         expect(summary.rows.map((r) => r.slug)).toEqual(['cached-candidate']);
-        expect(extractNamesSpy).not.toHaveBeenCalledWith(expect.objectContaining({ url: 'https://rival.com/integrations' }));
+        expect(extractNamesSpy).not.toHaveBeenCalledWith(
+            expect.objectContaining({ url: 'https://rival.com/integrations' }),
+        );
         expect(deps.writeNames).not.toHaveBeenCalledWith('rival', expect.anything());
     });
 
@@ -639,7 +752,9 @@ describe('runIntegrationRadar — cache reuse at the orchestration layer', () =>
             ),
         });
 
-        await expect(runIntegrationRadar(BASE_INPUT, deps)).rejects.toThrow('No source lists could be read.');
+        await expect(runIntegrationRadar(BASE_INPUT, deps)).rejects.toThrow(
+            'No competitor integrations pages could be read.',
+        );
         expect(deps.writeNames).not.toHaveBeenCalledWith('rival', expect.anything());
     });
 
@@ -663,7 +778,9 @@ describe('runIntegrationRadar — cache reuse at the orchestration layer', () =>
             }),
         });
 
-        await expect(runIntegrationRadar(BASE_INPUT, deps)).rejects.toThrow('No source lists could be read.');
+        await expect(runIntegrationRadar(BASE_INPUT, deps)).rejects.toThrow(
+            'No competitor integrations pages could be read.',
+        );
         expect(isListPageSpy).not.toHaveBeenCalled();
         expect(deps.writeListPageVerdict).not.toHaveBeenCalled();
     });
@@ -722,156 +839,12 @@ describe('runIntegrationRadar — weakEvidence', () => {
     });
 });
 
-describe('runIntegrationRadar — one namespace for peer and directory sources', () => {
-    it('does not count a domain that is both a competitor and a directory twice', async () => {
-        // `zapier.com` in both roles used to produce peerCount 1 + directoryCount 1 = 2
-        // from a single page of names, clearing the default minSources: 2 on its own.
-        const fetchUrlSpy = vi.fn(async (url: string): Promise<Resolved> => resolved({ hit: hit(url), key: url }));
-        const deps = baseDeps({
-            fetchUrl: fetchUrlSpy,
-            seedCompetitors: vi.fn(async (): Promise<Company[]> => [{ name: 'Zapier', domain: 'zapier.com' }]),
-            findIntegrations: vi.fn(async (domain: string): Promise<Resolved> => {
-                if (domain === 'mine.com') {
-                    return resolved({ hit: hit('https://mine.com/integrations'), key: 'own' });
-                }
-                return resolved({ hit: hit('https://zapier.com/apps'), key: 'zapier' });
-            }),
-            extractNames: vi.fn(async (page: PageHit): Promise<string[]> =>
-                page.url.includes('mine.com') ? ['Existing Thing'] : ['Double Counted'],
-            ),
-        });
-
-        const summary = await runIntegrationRadar(
-            { ...BASE_INPUT, directories: ['https://www.zapier.com/apps'], minSources: 2 },
-            deps,
-        );
-
-        // The directory is dropped before it is even fetched, so one page of names can
-        // no longer clear a two-source threshold by itself.
-        expect(fetchUrlSpy).not.toHaveBeenCalled();
-        expect(summary.rows).toHaveLength(0);
-    });
-
-    it('records one tier per source, so a directory cannot clear a peer weakEvidence flag', async () => {
-        const deps = baseDeps({
-            seedCompetitors: vi.fn(async (): Promise<Company[]> => [{ name: 'Zapier', domain: 'zapier.com' }]),
-            findIntegrations: vi.fn(async (domain: string): Promise<Resolved> => {
-                if (domain === 'mine.com') {
-                    return resolved({ hit: hit('https://mine.com/integrations'), key: 'own', tier: 'path' });
-                }
-                return resolved({ hit: hit('https://zapier.com/found-by-search'), key: 'zapier', tier: 'search' });
-            }),
-            fetchUrl: vi.fn(async (url: string): Promise<Resolved> => resolved({ hit: hit(url), key: url })),
-            extractNames: vi.fn(async (page: PageHit): Promise<string[]> =>
-                page.url.includes('mine.com') ? ['Existing Thing'] : ['Weakly Sourced'],
-            ),
-        });
-
-        const summary = await runIntegrationRadar({ ...BASE_INPUT, directories: ['https://zapier.com/apps'] }, deps);
-
-        // The directory pass used to run second and overwrite the peer's 'search' tier
-        // with 'path', silently clearing the flag.
-        expect(summary.rows.find((r) => r.slug === 'weakly-sourced')?.weakEvidence).toBe(true);
-    });
-});
-
-describe('runIntegrationRadar — the directory pass', () => {
-    /** Deps whose one competitor is `zapier.com` and whose one directory is zapier's. */
-    function collidingDeps(peerResolves: boolean, overrides: Partial<Deps> = {}): Deps {
-        return baseDeps({
-            seedCompetitors: vi.fn(async (): Promise<Company[]> => [{ name: 'Zapier', domain: 'zapier.com' }]),
-            findIntegrations: vi.fn(async (domain: string): Promise<Resolved> => {
-                if (domain === 'mine.com') {
-                    return resolved({ hit: hit('https://mine.com/integrations'), key: 'own' });
-                }
-                // The competitor URL is a *guess* (https://zapier.com/integrations, then a
-                // site-scoped search); the directory URL is hand-verified. The guess is
-                // what fails here.
-                return peerResolves
-                    ? resolved({ hit: hit('https://zapier.com/integrations'), key: 'zapier-peer' })
-                    : resolved({ hit: null, key: 'zapier-peer' });
-            }),
-            fetchUrl: vi.fn(async (url: string): Promise<Resolved> => resolved({ hit: hit(url), key: url })),
-            extractNames: vi.fn(async (page: PageHit): Promise<string[]> =>
-                page.url.includes('mine.com') ? ['Existing Thing'] : ['Only Zapier Has This'],
-            ),
-            ...overrides,
-        });
-    }
-
-    const ZAPIER_DIR = 'https://zapier.com/apps';
-
-    it('still reads a directory whose competitor failed to resolve', async () => {
-        // The coverage regression the dedup introduced: filtering directories against the
-        // RAW competitor list dropped zapier.com/apps before it was fetched and replaced
-        // it with a competitor URL guess. When that guess resolves to nothing — which is
-        // exactly what happens for a domain with no /integrations page — the source was
-        // lost outright rather than deduplicated. For an automation-platform user this
-        // silently removes three of the seven verified default directories.
-        const deps = collidingDeps(false);
-        const summary = await runIntegrationRadar({ ...BASE_INPUT, directories: [ZAPIER_DIR] }, deps);
-
-        expect(deps.fetchUrl).toHaveBeenCalledWith(ZAPIER_DIR);
-        expect(summary.rows.map((r) => r.slug)).toEqual(['only-zapier-has-this']);
-    });
-
-    it('drops the directory when the same domain DID resolve as a competitor', async () => {
-        // The dedup itself still has to work: one page of names must not count as two
-        // independent sources.
-        const deps = collidingDeps(true);
-        const summary = await runIntegrationRadar({ ...BASE_INPUT, directories: [ZAPIER_DIR] }, deps);
-
-        expect(deps.fetchUrl).not.toHaveBeenCalled();
-        const row = summary.rows.find((r) => r.slug === 'only-zapier-has-this');
-        expect(row?.peerCount).toBe(1);
-        expect(row?.directoryCount).toBe(0);
-    });
-
-    it('never reads the analyzed company itself as a directory', async () => {
-        // Its own names are what the diff subtracts; counting them as a source would let
-        // the company's own page carry a candidate toward minSources.
-        const deps = baseDeps({
-            fetchUrl: vi.fn(async (url: string): Promise<Resolved> => resolved({ hit: hit(url), key: url })),
-        });
-
-        await runIntegrationRadar({ ...BASE_INPUT, directories: ['https://www.mine.com/integrations'] }, deps);
-        expect(deps.fetchUrl).not.toHaveBeenCalled();
-    });
-
-    it('does not charge source-analyzed for a directory served from cache', async () => {
-        // The one `!resolved.fromCache` guard with no coverage: no test returned a
-        // fetchUrl result that was both a hit and cached, so deleting the directory
-        // branch's guard billed the user for every cached directory on every warm run
-        // and passed the whole suite.
-        const chargeSpy = vi.fn(async (event: { eventName: string; count: number }) => ({
-            chargedCount: event.count,
-            eventChargeLimitReached: false,
-        }));
-        const deps = baseDeps({
-            charge: chargeSpy,
-            fetchUrl: vi.fn(
-                async (url: string): Promise<Resolved> => resolved({ hit: hit(url), key: url, fromCache: true }),
-            ),
-            extractNames: vi.fn(async (page: PageHit): Promise<string[]> =>
-                page.url.includes('mine.com') ? ['Existing Thing'] : ['Candidate One'],
-            ),
-        });
-
-        const summary = await runIntegrationRadar(BASE_INPUT, deps);
-
-        // own + rival are fresh; the directory is cached and must not be counted.
-        expect(summary.freshSources).toBe(2);
-        expect(chargeSpy).toHaveBeenCalledWith({ eventName: 'source-analyzed', count: 2 });
-    });
-});
-
 describe('runIntegrationRadar — step 1: the competitor seed', () => {
     /** Deps whose competitor pages all resolve, so a cap can be observed by call count. */
     function resolvingDeps(overrides: Partial<Deps> = {}): Deps {
         return baseDeps({
-            findIntegrations: vi.fn(
-                async (domain: string): Promise<Resolved> =>
-                    resolved({ hit: hit(`https://${domain}/integrations`), key: domain }),
+            findIntegrations: vi.fn(async (domain: string): Promise<Resolved> =>
+                resolved({ hit: hit(`https://${domain}/integrations`), key: domain }),
             ),
             extractNames: vi.fn(async (page: PageHit): Promise<string[]> =>
                 page.url.includes('mine.com') ? ['Existing Thing'] : [`From ${new URL(page.url).hostname}`],
@@ -952,9 +925,9 @@ describe('runIntegrationRadar — step 1: the competitor seed', () => {
     });
 
     it('rejects an explicit competitors input with no usable domain', async () => {
-        await expect(
-            runIntegrationRadar({ ...BASE_INPUT, competitors: ['not a domain'] }, baseDeps()),
-        ).rejects.toThrow('No usable competitor domains in the "competitors" input');
+        await expect(runIntegrationRadar({ ...BASE_INPUT, competitors: ['not a domain'] }, baseDeps())).rejects.toThrow(
+            'No usable competitor domains in the "competitors" input',
+        );
     });
 
     it('rejects a competitors input that is not an array', async () => {
@@ -987,7 +960,7 @@ describe('runIntegrationRadar — step 1: the competitor seed', () => {
 
         // Called for the own integrations page, and for rival.com — but never for
         // mine.com as a competitor, which would let the company's own page carry a
-        // candidate toward minSources.
+        // candidate toward its own competitor count.
         expect(deps.findIntegrations).toHaveBeenCalledTimes(2);
         expect(deps.findIntegrations).toHaveBeenCalledWith('mine.com');
         expect(deps.findIntegrations).toHaveBeenCalledWith('rival.com');
@@ -1042,9 +1015,9 @@ describe('runIntegrationRadar — step 1: the competitor seed', () => {
     it('refuses a maxCompetitors that is not a whole number', async () => {
         // A bare `< 1` test would let `NaN` through — every comparison against it is false —
         // and `slice(0, NaN)` empties the set exactly like `slice(0, 0)` does.
-        await expect(
-            runIntegrationRadar({ ...BASE_INPUT, maxCompetitors: Number.NaN }, baseDeps()),
-        ).rejects.toThrow('"maxCompetitors" must be an integer of at least 1');
+        await expect(runIntegrationRadar({ ...BASE_INPUT, maxCompetitors: Number.NaN }, baseDeps())).rejects.toThrow(
+            '"maxCompetitors" must be an integer of at least 1',
+        );
     });
 
     it('keeps the model ordering when it cuts, rather than the alphabetical one', async () => {
@@ -1088,39 +1061,12 @@ describe('runIntegrationRadar — step 1: the competitor seed', () => {
     });
 });
 
-describe('runIntegrationRadar — the fingerprint covers the effective directories', () => {
-    it('treats an empty directories list and the seven defaults as the same question', async () => {
-        // `directories: []` means "use DEFAULT_DIRECTORIES", so a Console user who submits
-        // the prefilled seven URLs is asking exactly what an API caller passing `[]` is.
-        // Fingerprinting `input.directories` instead of the resolved list splits those into
-        // two memory lineages and rebaselines on a change the user never made.
-        const deps = baseDeps({
-            loadPrevious: vi.fn(async () => ({
-                slugs: ['candidate-one'],
-                sources: ['rival.com'],
-                fingerprint: inputFingerprint({
-                    companyDomain: 'mine.com',
-                    maxCompetitors: 20,
-                    directories: DEFAULT_DIRECTORIES,
-                    competitors: ['rival.com'],
-                }),
-            })),
-        });
-
-        const summary = await runIntegrationRadar({ ...BASE_INPUT, directories: [] }, deps);
-
-        expect(summary.isBaseline).toBe(false);
-        expect(summary.rows.find((r) => r.slug === 'candidate-one')?.status).toBe('SEEN');
-    });
-});
-
 describe('runIntegrationRadar — the fingerprint covers the effective competitor set', () => {
     /** Every competitor domain resolves, each page carrying one candidate named after it. */
     function resolvingDeps(overrides: Partial<Deps> = {}): Deps {
         return baseDeps({
-            findIntegrations: vi.fn(
-                async (domain: string): Promise<Resolved> =>
-                    resolved({ hit: hit(`https://${domain}/integrations`), key: domain }),
+            findIntegrations: vi.fn(async (domain: string): Promise<Resolved> =>
+                resolved({ hit: hit(`https://${domain}/integrations`), key: domain }),
             ),
             extractNames: vi.fn(async (page: PageHit): Promise<string[]> =>
                 page.url.includes('mine.com') ? ['Existing Thing'] : [`From ${new URL(page.url).hostname}`],

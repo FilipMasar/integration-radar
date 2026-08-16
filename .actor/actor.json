@@ -3,7 +3,7 @@
     "actorSpecification": 1,
     "name": "integration-radar",
     "title": "Integration Radar",
-    "description": "Find integrations, products and companies your competitors and the wider ecosystem carry, and you do not.",
+    "description": "Find the integrations your competitors carry and you do not, ranked by how many of them carry each one.",
     "version": "0.0",
     "buildTag": "latest",
     "meta": {
