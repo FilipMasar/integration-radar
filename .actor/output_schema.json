@@ -5,7 +5,8 @@
         "candidates": {
             "type": "string",
             "title": "Candidates",
-            "template": "{{links.apiDefaultDatasetUrl}}/items?clean=true"
+            "description": "Integrations the competitors carry and the analyzed company does not, ranked by how many competitors carry each one.",
+            "template": "{{links.apiDefaultDatasetUrl}}/items"
         }
     }
 }
