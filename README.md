@@ -1,5 +1,7 @@
 Integration Radar finds **the integrations your competitors carry and you don't**. Give it a company domain; it identifies that company's competitors, reads each one's integrations page, and reports every third-party product they list that is missing from the company's own — ranked by how many competitors actually carry each name, with the source pages cited.
 
+Run it on the Apify Store: [apify.com/filipmasar/integration-radar](https://apify.com/filipmasar/integration-radar)
+
 ## What does Integration Radar do?
 
 Integration Radar answers one question: **what do my competitors integrate with that I don't?** Give it a domain such as `apify.com` and it names that company's competitors automatically — or takes the list from you — reads what each of them integrates with, and diffs all of it against the company's own integrations page.
