@@ -3,6 +3,7 @@
 .idea
 .vscode
 .zed
+.superpowers
 storage
 apify_storage
 crawlee_storage
