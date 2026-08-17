@@ -4,6 +4,7 @@
 .vscode
 .zed
 .superpowers
+docs/superpowers
 storage
 apify_storage
 crawlee_storage
