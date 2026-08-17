@@ -115,6 +115,10 @@ export interface Deps {
 const CONCURRENCY = 4;
 const DEFAULT_MAX_ROWS = 100;
 
+/** Which state wins when the two charges disagree — see the use site. `none` is not here:
+ *  it means no charge was attempted, so no state was classified at all. */
+const CHARGE_STATE_PRECEDENCE = ['capped', 'charged', 'inactive'] as const;
+
 interface ResolvedInput {
     companyDomain: string;
     maxCompetitors: number;
@@ -367,7 +371,7 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
 
     // If our own page yielded far less than the sources we compare against, the diff is
     // measuring page completeness rather than real gaps.
-    const median = [...sources.map((s) => s.names.length)].sort((a, b) => a - b)[Math.floor(sources.length / 2)];
+    const median = sources.map((s) => s.names.length).sort((a, b) => a - b)[Math.floor(sources.length / 2)];
     if (mine.length < median * 0.4) {
         log.warning('Own list looks incomplete — treat results as low confidence', {
             mineCount: mine.length,
@@ -404,16 +408,19 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     const tags = diffAgainstPrevious(previous.slugs, current.slugs);
     const isBaseline = stored === null || previous.slugs.length === 0 || inputsChanged;
 
-    const rows: OutputRow[] = gaps.map((gap) => ({
-        ...gap,
-        description: described.get(gap.slug)?.description ?? '',
-        category: described.get(gap.slug)?.category ?? 'unknown',
-        // On a baseline everything is trivially new; saying NEW would imply a competitor
-        // just added it. `tags` was built from every slug in `ranked` and `gap` comes from
-        // a slice of `ranked`, so the assertion is safe rather than hopeful.
-        status: isBaseline ? 'BASELINE' : tags.get(gap.slug)!,
-        weakEvidence: gap.carriedBy.some((name) => tierBySource.get(name) === 'search'),
-    }));
+    const rows: OutputRow[] = gaps.map((gap) => {
+        const d = described.get(gap.slug);
+        return {
+            ...gap,
+            description: d?.description ?? '',
+            category: d?.category ?? 'unknown',
+            // On a baseline everything is trivially new; saying NEW would imply a competitor
+            // just added it. `tags` was built from every slug in `ranked` and `gap` comes from
+            // a slice of `ranked`, so the assertion is safe rather than hopeful.
+            status: isBaseline ? 'BASELINE' : tags.get(gap.slug)!,
+            weakEvidence: gap.carriedBy.some((name) => tierBySource.get(name) === 'search'),
+        };
+    });
 
     // 6. Publish first, then charge, so a migration between the two can never leave the
     //    user paying for rows they never received. The asymmetry is deliberate:
@@ -436,11 +443,11 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     ].filter((c) => c !== null);
 
     // Derived from the same classification the log lines use, so the summary and the log
-    // can never disagree about whether this run hit a budget cap.
+    // can never disagree about whether this run hit a budget cap. Worst news first: a cap
+    // reached on one event outranks another event billing cleanly, and `inactive` is what
+    // remains when charges were attempted but the run is not pay-per-event at all.
     const states = charges.map((c) => c.state);
-    const chargingState: ChargeState = states.includes('capped')
-        ? 'capped'
-        : (states.find((s) => s !== 'inactive') ?? states[0] ?? 'none');
+    const chargingState: ChargeState = CHARGE_STATE_PRECEDENCE.find((s) => states.includes(s)) ?? 'none';
 
     return {
         rows,

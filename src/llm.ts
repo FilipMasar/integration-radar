@@ -196,9 +196,8 @@ const MAX_CANDIDATE_NAME_LENGTH = 80;
  * breaks a model might read as fresh instructions, and the result is length-capped.
  * Exported so the normalization is unit-testable without an LLM call.
  */
-// Named rather than inlined into the chain below: a comment between `raw` and its first
-// `.replace` forces Prettier to wrap the whole expression in parentheses. Safe to share at
-// module level only because `replace` resets `lastIndex`; a `.test()` call on this would not.
+// Safe to share at module level only because `replace` resets `lastIndex` on a global
+// regex; a `.test()` call on this one would not.
 // eslint-disable-next-line no-control-regex -- deliberately matching control chars
 const CONTROL_CHARS_RE = /[\x00-\x1F\x7F]+/g;
 

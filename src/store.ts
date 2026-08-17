@@ -42,10 +42,13 @@ export function ttlHours(raw: string | undefined, fallback: number): number {
 const DEFAULT_CACHE_TTL_HOURS = 24;
 const DEFAULT_MISS_TTL_HOURS = 6;
 
+function ageHours(fetchedAt: string): number {
+    return (Date.now() - new Date(fetchedAt).getTime()) / 3_600_000;
+}
+
 /** Factored out so the age comparison is unit-testable without a store. */
 export function isExpired(fetchedAt: string, maxAgeHours: number): boolean {
-    const ageHours = (Date.now() - new Date(fetchedAt).getTime()) / 3_600_000;
-    return ageHours > maxAgeHours;
+    return ageHours(fetchedAt) > maxAgeHours;
 }
 
 interface CacheRecord {
@@ -57,18 +60,35 @@ interface CacheRecord {
     isListPage?: boolean;
 }
 
-/** Null on a miss OR on an expired entry — expiry is what makes change detection possible. */
-export async function readCache(key: string): Promise<PageHit | null> {
+/**
+ * The page record, or null on a miss OR on an expired entry — expiry is what makes change
+ * detection possible. Every read below goes through here, so the three things stored in a
+ * record (the page, its names, the gate's verdict) can never disagree about freshness.
+ */
+async function readFresh(key: string): Promise<CacheRecord | null> {
     const kv = await getStore();
     const record = await kv.getValue<CacheRecord>(key);
     if (!record) return null;
 
     if (isExpired(record.fetchedAt, ttlHours(process.env.CACHE_TTL_HOURS, DEFAULT_CACHE_TTL_HOURS))) {
-        const ageHours = (Date.now() - new Date(record.fetchedAt).getTime()) / 3_600_000;
-        log.info('Cache expired', { key, ageHours: Math.round(ageHours) });
+        log.info('Cache expired', { key, ageHours: Math.round(ageHours(record.fetchedAt)) });
         return null;
     }
-    return record.hit;
+    return record;
+}
+
+/**
+ * Attach fields to an existing page record. Only ever attaches, never creates: an entry
+ * with no page behind it would outlive its source and quietly go stale.
+ */
+async function patchRecord(key: string, fields: Partial<CacheRecord>): Promise<void> {
+    const kv = await getStore();
+    const record = await kv.getValue<CacheRecord>(key);
+    if (record) await kv.setValue(key, { ...record, ...fields });
+}
+
+export async function readCache(key: string): Promise<PageHit | null> {
+    return (await readFresh(key))?.hit ?? null;
 }
 
 export async function writeCache(key: string, hit: PageHit): Promise<void> {
@@ -77,34 +97,19 @@ export async function writeCache(key: string, hit: PageHit): Promise<void> {
 }
 
 /**
- * The extracted name list, stored in the same record as the page it came from so the two
- * can never disagree about freshness. LLM calls are roughly half the cost of a run and are
- * not otherwise recoverable: a container migration restarts `main.ts` from the top.
+ * The extracted name list. LLM calls are roughly half the cost of a run and are not
+ * otherwise recoverable: a container migration restarts `main.ts` from the top.
  */
 export async function readNames(key: string): Promise<string[] | null> {
-    const kv = await getStore();
-    const record = await kv.getValue<CacheRecord>(key);
-    if (!record?.names) return null;
-
-    if (isExpired(record.fetchedAt, ttlHours(process.env.CACHE_TTL_HOURS, DEFAULT_CACHE_TTL_HOURS))) {
-        const ageHours = (Date.now() - new Date(record.fetchedAt).getTime()) / 3_600_000;
-        log.info('Names expired', { key, ageHours: Math.round(ageHours) });
-        return null;
-    }
-    return record.names;
+    return (await readFresh(key))?.names ?? null;
 }
 
 export async function writeNames(key: string, names: string[]): Promise<void> {
-    const kv = await getStore();
-    const record = await kv.getValue<CacheRecord>(key);
-    // Only ever attach to an existing page record: a names entry with no page behind it
-    // would outlive its source and quietly go stale.
-    if (record) await kv.setValue(key, { ...record, names });
+    await patchRecord(key, { names });
 }
 
 /**
- * The search-tier gate's verdict, cached against the page it judged — same shape and
- * reasoning as `readNames`.
+ * The search-tier gate's verdict, cached against the page it judged.
  *
  * Deciding once per cached page rather than once per run is a correctness measure, not
  * only a cost one. At `temperature: 0` the verdict is expected to be stable but is not
@@ -113,24 +118,14 @@ export async function writeNames(key: string, names: string[]): Promise<void> {
  * has no safety net: it injects a spurious `NEW` sourced from nothing but nondeterminism.
  *
  * Returns `null`, not `false`, when nothing is cached — `false` is a real cached answer,
- * not an absence of one.
+ * not an absence of one, which is why the `?? null` below must not become `?? false`.
  */
 export async function readListPageVerdict(key: string): Promise<boolean | null> {
-    const kv = await getStore();
-    const record = await kv.getValue<CacheRecord>(key);
-    if (!record || record.isListPage === undefined) return null;
-
-    if (isExpired(record.fetchedAt, ttlHours(process.env.CACHE_TTL_HOURS, DEFAULT_CACHE_TTL_HOURS))) {
-        return null;
-    }
-    return record.isListPage;
+    return (await readFresh(key))?.isListPage ?? null;
 }
 
 export async function writeListPageVerdict(key: string, isListPage: boolean): Promise<void> {
-    const kv = await getStore();
-    const record = await kv.getValue<CacheRecord>(key);
-    // Same rule as `writeNames`: never outlive the page record.
-    if (record) await kv.setValue(key, { ...record, isListPage });
+    await patchRecord(key, { isListPage });
 }
 
 interface MissRecord {

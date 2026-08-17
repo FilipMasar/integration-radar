@@ -56,12 +56,9 @@ export const INTEGRATIONS_PATH = '/integrations';
 /**
  * Generic capabilities that appear on every vendor's page. Without these the output is
  * topped by "API" and "Webhooks" every run.
- *
- * Kept in rows rather than one term per line, which is why the ignore below is here — the
- * directive must be exactly `prettier-ignore`, so the reason cannot ride along on its line.
  */
 // prettier-ignore
-export const STOPWORDS = new Set([
+const STOPWORDS = new Set([
     'api', 'rest-api', 'graphql', 'webhooks', 'webhook', 'http', 'http-request',
     'sdk', 'cli', 'email', 'csv', 'json', 'xml', 'rss', 'ftp', 'sftp',
     'custom-integration', 'other', 'more', 'all',
@@ -72,7 +69,7 @@ export const STOPWORDS = new Set([
  * separate rows at `competitorCount: 1`, instead of one row carried by three competitors —
  * splitting the evidence for a candidate across the spellings used to describe it.
  */
-export const ALIASES: Record<string, string> = {
+const ALIASES: Record<string, string> = {
     's3': 'amazon-s3',
     'aws-s3': 'amazon-s3',
     'make-com': 'make',
