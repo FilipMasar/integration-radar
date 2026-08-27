@@ -84,9 +84,7 @@ Reply as {"competitors": [{"name": "...", "domain": "..."}]}`,
 
     if (!result) return [];
 
-    const unique = normalizeCompetitors(result.competitors);
-    log.info('Seeded competitors', { domain, returned: result.competitors.length, usable: unique.length });
-    return unique;
+    return normalizeCompetitors(result.competitors);
 }
 
 const NamesSchema = z.object({ names: z.array(z.string()) });
@@ -111,9 +109,7 @@ ${page.markdown.slice(0, MAX_CHARS)}`,
     );
 
     if (!result) return [];
-    const cleaned = [...new Set(result.names.map((s) => s.trim()).filter(Boolean))];
-    log.info('Extracted names', { count: cleaned.length, url: page.url });
-    return cleaned;
+    return [...new Set(result.names.map((s) => s.trim()).filter(Boolean))];
 }
 
 const IsListSchema = z.object({ isList: z.boolean(), reason: z.string() });
@@ -136,7 +132,7 @@ ${page.markdown.slice(0, 6000)}`,
 
     // Fail open: a page wrongly kept is visible noise, a page wrongly dropped is silent.
     if (!result) return true;
-    if (!result.isList) log.info('Rejected non-list page', { url: page.url, reason: result.reason });
+    if (!result.isList) log.debug('Rejected non-list page', { url: page.url, reason: result.reason });
     return result.isList;
 }
 

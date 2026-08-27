@@ -13,7 +13,7 @@ vi.mock('openai', () => ({
 }));
 
 vi.mock('apify', () => ({
-    log: { info: vi.fn(), warning: vi.fn() },
+    log: { debug: vi.fn(), info: vi.fn(), warning: vi.fn() },
 }));
 
 const ENV_KEYS = ['LLM_API_KEY', 'LLM_BASE_URL', 'LLM_MODEL', 'APIFY_TOKEN'] as const;

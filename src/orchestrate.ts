@@ -111,10 +111,7 @@ async function chargeFor(
 
     if (outcome.chargedCount >= count) return { outcome, state: 'charged' };
 
-    if (outcome.chargedCount === 0 && !outcome.eventChargeLimitReached) {
-        log.info('Charging is not active for this run — nothing was billed', { eventName, requested: count });
-        return { outcome, state: 'inactive' };
-    }
+    if (outcome.chargedCount === 0 && !outcome.eventChargeLimitReached) return { outcome, state: 'inactive' };
 
     log.warning('Charged fewer events than requested — a max-charge limit was reached', {
         eventName,
@@ -126,10 +123,7 @@ async function chargeFor(
 
 async function namesFor(deps: Deps, resolved: Resolved): Promise<string[]> {
     const cached = await deps.readNames(resolved.key);
-    if (cached) {
-        log.info('Names from cache', { url: resolved.hit!.url, count: cached.length });
-        return cached;
-    }
+    if (cached) return cached;
     const names = await deps.extractNames(resolved.hit!);
     if (names.length > 0) await deps.writeNames(resolved.key, names);
     return names;
@@ -142,9 +136,7 @@ async function confirmed(deps: Deps, resolved: Resolved): Promise<Resolved> {
     const isList = cachedVerdict ?? (await deps.isListPage(resolved.hit));
     if (cachedVerdict === null) await deps.writeListPageVerdict(resolved.key, isList);
 
-    if (isList) return resolved;
-    log.info('Rejected search hit — not a list page', { url: resolved.hit.url });
-    return { ...resolved, hit: null };
+    return isList ? resolved : { ...resolved, hit: null };
 }
 
 async function discoverCompetitors(
@@ -222,10 +214,22 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     const results = await mapLimit(competitors, CONCURRENCY, async (competitor) => {
         try {
             const resolved = await confirmed(deps, await deps.findIntegrations(competitor.domain));
-            if (!resolved.hit) return null;
+            if (!resolved.hit) {
+                log.info('Competitor skipped — no integrations page', { domain: competitor.domain });
+                return null;
+            }
             const names = await namesFor(deps, resolved);
-            if (names.length === 0) return null;
+            if (names.length === 0) {
+                log.info('Competitor skipped — nothing extracted', { domain: competitor.domain });
+                return null;
+            }
             if (!resolved.fromCache) freshSources += 1;
+            log.info('Competitor read', {
+                domain: competitor.domain,
+                count: names.length,
+                url: resolved.hit.url,
+                via: resolved.tier,
+            });
             const name = sourceName(competitor.domain);
             if (resolved.tier) tierBySource.set(name, resolved.tier);
             return { name, names };
@@ -287,7 +291,7 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
     if (rows.length > 0) await deps.pushData(rows);
 
     const { memory, replaced: memoryReplaced } = mergeMemory(previous, current, inputsChanged);
-    log.info('Memory', {
+    log.debug('Memory', {
         stored: memory.slugs.length,
         thisRun: current.slugs.length,
         replaced: memoryReplaced,

@@ -50,10 +50,7 @@ async function readFresh(key: string): Promise<CacheRecord | null> {
     const record = await kv.getValue<CacheRecord>(key);
     if (!record) return null;
 
-    if (isExpired(record.fetchedAt, ttlHours(process.env.CACHE_TTL_HOURS, DEFAULT_CACHE_TTL_HOURS))) {
-        log.info('Cache expired', { key, ageHours: Math.round(ageHours(record.fetchedAt)) });
-        return null;
-    }
+    if (isExpired(record.fetchedAt, ttlHours(process.env.CACHE_TTL_HOURS, DEFAULT_CACHE_TTL_HOURS))) return null;
     return record;
 }
 
@@ -102,11 +99,7 @@ export async function readMiss(key: string): Promise<boolean> {
     const record = await kv.getValue<MissRecord>(missKey(key));
     if (!record) return false;
 
-    if (isExpired(record.missedAt, ttlHours(process.env.MISS_TTL_HOURS, DEFAULT_MISS_TTL_HOURS))) {
-        return false;
-    }
-    log.info('Known miss', { key });
-    return true;
+    return !isExpired(record.missedAt, ttlHours(process.env.MISS_TTL_HOURS, DEFAULT_MISS_TTL_HOURS));
 }
 
 export async function writeMiss(key: string): Promise<void> {
@@ -128,7 +121,6 @@ export async function readSeed(domain: string, maxCompetitors: number): Promise<
     const kv = await getStore();
     const record = await kv.getValue<SeedRecord>(seedKey(domain, maxCompetitors));
     if (!record?.competitors?.length) return null;
-    log.info('Competitor seed from cache', { domain, count: record.competitors.length, seededAt: record.seededAt });
     return record.competitors;
 }
 
@@ -155,11 +147,8 @@ interface PreviousRun extends Partial<StoredMemory> {
 export async function loadPrevious(companyDomain: string): Promise<StoredMemory | null> {
     const kv = await getStore();
     const record = await kv.getValue<PreviousRun>(cacheKey('previous', companyDomain));
-    if (!record) {
-        log.info('No previous run — this is a baseline');
-        return null;
-    }
-    log.info('Loaded previous run', {
+    if (!record) return null;
+    log.debug('Loaded previous run', {
         date: record.date,
         count: record.slugs.length,
         sources: record.sources?.length ?? 0,
