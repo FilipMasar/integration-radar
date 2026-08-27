@@ -6,7 +6,6 @@ function hit(markdown: string, url = 'https://example.com/integrations'): PageHi
     return { url, markdown };
 }
 
-/** Builds markdown of an exact character length containing exactly `linkCount` markdown links. */
 function markdownOfLength(totalLength: number, linkCount: number): string {
     const links = Array.from({ length: Math.max(0, linkCount) }, (_, i) => `[l${i}](u)`).join('');
     const padding = 'x'.repeat(Math.max(0, totalLength - links.length));

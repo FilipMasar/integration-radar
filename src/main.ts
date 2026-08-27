@@ -19,8 +19,6 @@ import { findIntegrations } from './web.js';
 
 await Actor.init();
 
-// Exit promptly on abort rather than making more paid child-Actor and LLM calls after the
-// user or the platform asked the run to stop.
 Actor.on('aborting', async () => {
     await setTimeout(1000);
     await Actor.exit();
@@ -29,8 +27,6 @@ Actor.on('aborting', async () => {
 const input = await Actor.getInput<Input>();
 if (!input) throw new Error('Input is missing!');
 
-// Wiring only. The logic lives in `runIntegrationRadar`, which takes every external
-// boundary as an injectable dependency — see its `Deps` doc comment.
 const summary = await runIntegrationRadar(input, {
     findIntegrations,
     seedCompetitors,
@@ -46,8 +42,6 @@ const summary = await runIntegrationRadar(input, {
     loadPrevious,
     savePrevious,
     pushData: async (rows) => Actor.pushData(rows),
-    // The result is passed through, not swallowed: `chargedCount` can be lower than
-    // requested once a max-charge limit is reached, and `chargeFor` checks it.
     charge: async (event) => Actor.charge(event),
 });
 
