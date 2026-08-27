@@ -92,10 +92,6 @@ describe('normalizeCompetitors', () => {
 
     it('drops an entry whose domain is not a domain', () => {
         expect(normalizeCompetitors([{ name: 'Bad', domain: 'not a domain' }])).toEqual([]);
-        // Two cases, because 'not a domain' fails `DOMAIN_RE` for two independent reasons
-        // (spaces AND no dot) and would still be rejected by a pattern that dropped the dot
-        // requirement — which would then accept a bare model-invented word like this one and
-        // spend a real fetch on it.
         expect(normalizeCompetitors([{ name: 'Bad', domain: 'notadomain' }])).toEqual([]);
     });
 
@@ -134,8 +130,6 @@ describe('rankCandidates', () => {
     });
 
     it('counts every competitor carrying a name and cites each one in carriedBy', () => {
-        // `carriedBy` is the product's evidence field — the only thing a reader can check a
-        // row against — so its content and order are pinned, not just its length.
         const [top] = rankCandidates([], mixedSources);
         expect(top.slug).toBe('weaviate');
         expect(top.competitorCount).toBe(3);
@@ -163,9 +157,6 @@ describe('rankCandidates', () => {
     });
 
     it('breaks a count tie alphabetically, so the order is stable between runs', () => {
-        // Both have exactly one competitor, so only the tiebreak can order them. Deleting
-        // the `localeCompare` clause leaves insertion order, which is 'zzz' first — so this
-        // fails without it rather than passing by luck.
         const s = [{ name: 'a.com', names: ['zzz-last', 'aaa-first'] }];
         const ranked = rankCandidates([], s);
         expect(ranked.map((c) => c.competitorCount)).toEqual([1, 1]);
@@ -189,9 +180,6 @@ describe('inputFingerprint', () => {
     });
 
     it('changes when one competitor is swapped for another', () => {
-        // The field carries the set the run *effectively reads* (see the call site in
-        // orchestrate.ts), so two same-length sets that differ by one entry are two different
-        // questions and the next run must not diff one against the other.
         expect(inputFingerprint({ ...base, competitors: ['a.com', 'b.com'] })).not.toBe(
             inputFingerprint({ ...base, competitors: ['a.com', 'c.com'] }),
         );
@@ -220,24 +208,17 @@ describe('mergeMemory', () => {
             false,
         );
         expect(replaced).toBe(true);
-        expect(memory.slugs).toEqual(['b', 'c']); // 'a' genuinely disappeared and drops out
+        expect(memory.slugs).toEqual(['b', 'c']);
     });
 
     it('unions when a source memory rests on did not resolve this run', () => {
-        // The measured scenario: brightdata.com resolved last run, not this one. A naive
-        // merge would forget its candidates and re-tag them NEW when it comes back.
         const { memory, replaced } = mergeMemory(mem(['a', 'b'], ['x.com', 'flaky.com']), mem(['b'], ['x.com']), false);
         expect(replaced).toBe(false);
         expect(new Set(memory.slugs)).toEqual(new Set(['a', 'b']));
-        // The basis accumulates, so flaky.com stays part of what memory rests on.
         expect(new Set(memory.sources)).toEqual(new Set(['x.com', 'flaky.com']));
     });
 
     it('unions when a source was never attempted, not merely unresolved', () => {
-        // THE critical hole: a competitor dropped before the resolution loop (model
-        // nondeterminism, a maxCompetitors cut, an edited competitors list) never shows
-        // up as an unresolved entry, so the old coverage-flag gate read "complete" and
-        // replaced memory. Comparing evidence bases sees it.
         const { memory, replaced } = mergeMemory(
             mem(['a', 'b'], ['x.com', 'dropped.com']),
             mem(['b'], ['x.com']),
@@ -260,9 +241,6 @@ describe('mergeMemory', () => {
     });
 
     it('never drops slugs when the inputs changed, but resets the basis to this run', () => {
-        // The caller reports this run as a baseline, so no NEW is shown; keeping the old
-        // slugs protects the run AFTER it, and resetting the basis stops the abandoned
-        // configuration's sources from freezing memory forever.
         const { memory, replaced } = mergeMemory(mem(['a'], ['old.com']), mem(['b'], ['new.com']), true);
         expect(replaced).toBe(false);
         expect(new Set(memory.slugs)).toEqual(new Set(['a', 'b']));
@@ -270,43 +248,30 @@ describe('mergeMemory', () => {
     });
 
     it('end to end: a flaky source never produces a spurious second NEW', () => {
-        // Simulates the measured scenario: brightdata.com resolves, then fails to
-        // resolve, then resolves again, across three runs of an otherwise-unchanged
-        // candidate set.
         let memory = mem([], []);
 
-        // Run 1: both sources read, baseline.
         let current = mem(['brightdata-candidate', 'stable-candidate'], ['brightdata.com', 'stable.com']);
         let tags = diffAgainstPrevious(memory.slugs, current.slugs);
         expect(tags.get('brightdata-candidate')).toBe('NEW');
         memory = mergeMemory(memory, current, false).memory;
 
-        // Run 2: brightdata.com fails to resolve, so its candidate drops out of this
-        // run's evidence and out of this run's evidence base.
         current = mem(['stable-candidate'], ['stable.com']);
         tags = diffAgainstPrevious(memory.slugs, current.slugs);
         expect(tags.get('stable-candidate')).toBe('SEEN');
         memory = mergeMemory(memory, current, false).memory;
-        expect(memory.slugs).toContain('brightdata-candidate'); // carried forward, not erased
+        expect(memory.slugs).toContain('brightdata-candidate');
 
-        // Run 3: brightdata.com resolves again. A naive implementation that overwrote
-        // memory in run 2 would tag this NEW a second time; it must read SEEN.
         current = mem(['brightdata-candidate', 'stable-candidate'], ['brightdata.com', 'stable.com']);
         tags = diffAgainstPrevious(memory.slugs, current.slugs);
         expect(tags.get('brightdata-candidate')).toBe('SEEN');
     });
 
     it('end to end: a removal survives one blind run and then genuinely drops out', () => {
-        // The property `mergeMemory`'s doc comment claims, which the old coverage-flag
-        // gate did not actually have: it required ALL 20 competitors to resolve and so
-        // essentially never fired, and memory only ever grew.
         let memory = mem(['gone', 'kept'], ['peer.com', 'dir.io']);
 
-        // A blind run (dir.io down) must NOT drop 'gone' — no evidence it went anywhere.
         memory = mergeMemory(memory, mem(['kept'], ['peer.com']), false).memory;
         expect(memory.slugs).toContain('gone');
 
-        // The next run reads both sources again: now 'gone' really is gone.
         const merged = mergeMemory(memory, mem(['kept'], ['peer.com', 'dir.io']), false);
         expect(merged.replaced).toBe(true);
         expect(merged.memory.slugs).not.toContain('gone');

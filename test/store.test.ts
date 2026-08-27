@@ -1,14 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-/**
- * `readListPageVerdict`/`writeListPageVerdict` (and `writeCache`, used here to seed a
- * page record for them to attach to) go through `getStore()`, i.e. `Actor.
- * openKeyValueStore(...)`, so this file needs a fake key-value store. `cacheKey`/
- * `isExpired`/`ttlHours` above are pure and never touch `Actor`, so this mock is inert
- * for them. The fake is a plain `Map` behind `getValue`/`setValue` — enough to exercise
- * "attach to an existing record" / "no record yet" / "TTL expiry", the actual contracts
- * these functions promise.
- */
 const kvData = new Map<string, unknown>();
 
 vi.mock('apify', () => ({
@@ -121,9 +112,6 @@ describe('readListPageVerdict / writeListPageVerdict', () => {
     });
 
     it('round-trips a false verdict distinctly from "never gated"', async () => {
-        // The bug this guards against: an earlier draft could have used `record.isListPage`
-        // as a truthy check, which cannot tell a cached `false` apart from "no verdict yet"
-        // and would silently re-run the LLM gate on every rejected page forever.
         await writeCache('key-false', { url: 'https://example.com', markdown: 'hi' });
         await writeListPageVerdict('key-false', false);
         expect(await readListPageVerdict('key-false')).toBe(false);
@@ -166,10 +154,6 @@ describe('readCache / writeCache', () => {
     });
 
     it('drops the extracted names and the gate verdict when the page is refetched', async () => {
-        // Load-bearing: a *fresh* page must not inherit the previous page's extracted
-        // names or isListPage verdict — they describe content that no longer exists.
-        // Writing `{...record, fetchedAt, hit}` instead of a fresh object would leave
-        // both attached, and nothing else in the suite would notice.
         await writeCache('key', PAGE);
         await writeNames('key', ['Old Name']);
         await writeListPageVerdict('key', true);
@@ -216,8 +200,6 @@ describe('readMiss / writeMiss', () => {
     it('round-trips a miss under its own key, never inside the page record', async () => {
         await writeMiss('key');
         expect(await readMiss('key')).toBe(true);
-        // An earlier draft cached a falsy value inside the page record; `[]` is truthy in
-        // JS, so it read back as a page *hit* and disabled the tier for that domain.
         expect(await readCache('key')).toBeNull();
     });
 
@@ -226,13 +208,11 @@ describe('readMiss / writeMiss', () => {
     });
 
     it('reads the 6h miss TTL, not the 24h page TTL', async () => {
-        // Pointing readMiss at CACHE_TTL_HOURS passes every other test in this file, and
-        // would make a transient miss stick for a full day instead of six hours.
         kvData.set('key-miss', { missedAt: hoursAgo(10) });
         kvData.set('key', { fetchedAt: hoursAgo(10), hit: PAGE });
 
-        expect(await readMiss('key')).toBe(false); // 10h > 6h
-        expect(await readCache('key')).toEqual(PAGE); // 10h < 24h — same age, different verdict
+        expect(await readMiss('key')).toBe(false);
+        expect(await readCache('key')).toEqual(PAGE);
     });
 
     it('honours MISS_TTL_HOURS and CACHE_TTL_HOURS independently', async () => {
@@ -240,24 +220,18 @@ describe('readMiss / writeMiss', () => {
         kvData.set('key', { fetchedAt: hoursAgo(1), hit: PAGE });
 
         process.env.CACHE_TTL_HOURS = '0';
-        expect(await readCache('key')).toBeNull(); // forced page expiry...
-        expect(await readMiss('key')).toBe(true); // ...must not expire the miss
+        expect(await readCache('key')).toBeNull();
+        expect(await readMiss('key')).toBe(true);
 
         delete process.env.CACHE_TTL_HOURS;
         process.env.MISS_TTL_HOURS = '0';
-        expect(await readMiss('key')).toBe(false); // forced miss expiry...
-        expect(await readCache('key')).toEqual(PAGE); // ...must not expire the page
-        // Cleared here, not just in this block's `beforeEach`: a forced `0` TTL left set
-        // leaks into every describe that follows (the seed block, `loadPrevious`), whose own
-        // hooks clear `kvData` but not the environment. Nothing there reads a TTL today, so
-        // the leak would surface as a mystery failure in whichever test first did.
+        expect(await readMiss('key')).toBe(false);
+        expect(await readCache('key')).toEqual(PAGE);
         delete process.env.MISS_TTL_HOURS;
     });
 });
 
 describe('readSeed / writeSeed', () => {
-    // The one block in this file that used to run on whatever the previous describe left
-    // behind — a store still holding its keys, and its forced-expiry env vars still set.
     beforeEach(() => {
         kvData.clear();
         delete process.env.CACHE_TTL_HOURS;
@@ -280,18 +254,11 @@ describe('readSeed / writeSeed', () => {
         const key = [...kvData.keys()].find((k) => k.includes('ancient-com'))!;
         kvData.set(key, { seededAt: hoursAgo(24 * 365), competitors: RIVALS });
 
-        // The one record in this store with no TTL. If a later change adds an expiry
-        // check here, this fails — which is the point: a re-rolled seed fabricates NEW.
         expect(await readSeed('ancient.com', 20)).toEqual(RIVALS);
     });
 
     it('never writes an empty seed', async () => {
         await writeSeed('empty.com', 20, []);
-        // Checked at the storage layer, not just through readSeed: readSeed's own
-        // `record?.competitors?.length` check would mask a written `competitors: []`
-        // record and read it back as null regardless, so asserting only the read
-        // outcome would pass even if writeSeed's guard were deleted. Confirming no
-        // key was ever created is what actually proves the write was skipped.
         expect([...kvData.keys()].some((k) => k.includes('empty-com'))).toBe(false);
         expect(await readSeed('empty.com', 20)).toBeNull();
     });
@@ -314,8 +281,6 @@ describe('loadPrevious / savePrevious', () => {
     });
 
     it('returns null when nothing has ever been stored', async () => {
-        // Distinct from "stored, but with no slugs": the caller needs to tell a genuine
-        // first run apart from a run whose memory happens to be empty.
         expect(await loadPrevious('apify.com')).toBeNull();
     });
 
@@ -330,9 +295,6 @@ describe('loadPrevious / savePrevious', () => {
     });
 
     it('reads a pre-fingerprint record as fingerprint null, not as a match', async () => {
-        // A record written before fingerprinting existed was gathered under unknown
-        // conditions. Defaulting it to anything other than null would let the next run
-        // diff blind against it.
         kvData.set(cacheKey('previous', 'apify.com'), { date: '2026-08-10', slugs: ['clay'] });
         expect(await loadPrevious('apify.com')).toEqual({ slugs: ['clay'], sources: [], fingerprint: null });
     });
