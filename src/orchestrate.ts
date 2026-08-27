@@ -82,9 +82,10 @@ interface ResolvedInput {
     supplied: string[];
 }
 
-// The input schema binds the Console form, not an API caller. Both guards run before anything is
-// fetched or charged, so a bad `maxCompetitors` cannot empty the competitor set at the cut below
-// after the run has already paid for the company's own page.
+// The platform validates input against the schema on every run, Console or API, but a local
+// `apify run` does not. Both guards run before anything is fetched or charged, so a bad
+// `maxCompetitors` cannot empty the competitor set at the cut below after the run has already
+// paid for the company's own page.
 function resolveInput(input: Input): ResolvedInput {
     const maxCompetitors = input.maxCompetitors ?? 20;
     if (!Number.isInteger(maxCompetitors) || maxCompetitors < 1) {
