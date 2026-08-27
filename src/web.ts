@@ -23,25 +23,51 @@ export interface Resolved {
     tier: 'path' | 'search' | null;
 }
 
+// Aborting our run does not touch a child run; it keeps billing until its own timeout.
+const liveChildRuns = new Set<string>();
+
+export async function abortChildren(): Promise<void> {
+    const ids = [...liveChildRuns];
+    liveChildRuns.clear();
+    if (ids.length === 0) return;
+
+    const client = Actor.newClient();
+    await Promise.all(
+        ids.map(async (runId) => {
+            try {
+                await client.run(runId).abort();
+            } catch (err) {
+                log.warning('Could not abort child run', { runId, error: (err as Error).message });
+            }
+        }),
+    );
+    log.info('Aborted child runs', { count: ids.length });
+}
+
 async function runRagBrowser(query: string, render: boolean, maxResults: number): Promise<RagItem[]> {
     const tool = render ? 'browser-playwright' : 'raw-http';
     const client = Actor.newClient();
     const startedAt = Date.now();
 
-    const run = await client.actor(RAG_WEB_BROWSER).call(
+    // Not `call`: it returns the run only once it is over, and abortChildren needs the ID before then.
+    const started = await client.actor(RAG_WEB_BROWSER).start(
         {
             query,
             maxResults,
             outputFormats: ['markdown'],
             scrapingTool: tool,
         },
-        {
-            // Live renders logged "memory critically overloaded" at the default; the timeout bounds a hang.
-            ...(render ? { memory: 4096, timeout: 180 } : { memory: 1024, timeout: 60 }),
-            // Any value but `null` streams the child's entire log into ours; the line below replaces it.
-            log: null,
-        },
+        // Live renders logged "memory critically overloaded" at the default; the timeout bounds a hang.
+        render ? { memory: 4096, timeout: 180 } : { memory: 1024, timeout: 60 },
     );
+
+    let run;
+    liveChildRuns.add(started.id);
+    try {
+        run = await client.run(started.id).waitForFinish();
+    } finally {
+        liveChildRuns.delete(started.id);
+    }
     const { items } = await client.dataset(run.defaultDatasetId).listItems();
 
     const results = items as unknown as RagItem[];
