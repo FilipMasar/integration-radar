@@ -131,8 +131,11 @@ This Actor uses **pnpm**, not npm. It is pinned by `"packageManager": "pnpm@10.2
   ignores, so local and cloud dependency trees drift apart.
 - `apify run` prints `Run: npm run start`; that is the CLI hardcoding npm for that one command.
   It works because the `start` script hands off to pnpm. Leave it alone.
-- The `apify/actor-node` base image ships only npm and sets `NODE_ENV=production`, so the
-  Dockerfile installs pnpm itself and passes `--prod=false` in the build stage.
+- The `apify/actor-node` base image provides pnpm through corepack shims, which resolve the
+  version pinned by `packageManager`. The Dockerfile therefore installs nothing — an
+  `npm install -g pnpm` there fails with `EEXIST` on `/usr/local/bin/pnpx`.
+- The base image sets `NODE_ENV=production`, so the Dockerfile passes `--prod=false` in the
+  build stage or pnpm would skip devDependencies.
 - pnpm 10 blocks dependency install scripts by default. Approvals live in
   `pnpm.onlyBuiltDependencies` in `package.json` (currently `esbuild`, `unrs-resolver`) so they
   apply in Docker and CI too. Add to that list rather than running `pnpm approve-builds`.
