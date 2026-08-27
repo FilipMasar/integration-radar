@@ -5,6 +5,8 @@
     "title": "Integration Radar",
     "description": "Find the integrations your competitors carry and you do not, ranked by how many of them carry each one.",
     "version": "0.0",
+    "minMemoryMbytes": 256,
+    "maxMemoryMbytes": 1024,
     "buildTag": "latest",
     "meta": {
         "templateId": "ts-empty",
