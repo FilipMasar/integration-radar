@@ -28,6 +28,24 @@ function sentPrompt(callIndex = 0): string {
     return mockCreate.mock.calls[callIndex][0].messages[1].content as string;
 }
 
+// completeJson backs off between attempts, so a call that retries outruns the default test
+// timeout on a real clock. Step a fake one instead of shortening the production delay.
+async function settle<T>(run: () => Promise<T>): Promise<T> {
+    vi.useFakeTimers();
+    try {
+        const pending = run();
+        let done = false;
+        void pending.then(
+            () => (done = true),
+            () => (done = true),
+        );
+        while (!done) await vi.advanceTimersByTimeAsync(1_000);
+        return await pending;
+    } finally {
+        vi.useRealTimers();
+    }
+}
+
 beforeEach(() => {
     mockCreate.mockReset();
 });
@@ -73,7 +91,7 @@ describe('seedCompetitors', () => {
             json(JSON.stringify({ competitors: [{ name: 'Weaviate', domain: 'weaviate.io' }] })),
         );
 
-        const result = await seedCompetitors('mine.com', 20);
+        const result = await settle(async () => seedCompetitors('mine.com', 20));
 
         expect(mockCreate).toHaveBeenCalledTimes(2);
         expect(result).toEqual([{ name: 'Weaviate', domain: 'weaviate.io' }]);
@@ -85,7 +103,7 @@ describe('seedCompetitors', () => {
             json(JSON.stringify({ competitors: [{ name: 'Weaviate', domain: 'weaviate.io' }] })),
         );
 
-        const result = await seedCompetitors('mine.com', 20);
+        const result = await settle(async () => seedCompetitors('mine.com', 20));
 
         expect(mockCreate).toHaveBeenCalledTimes(2);
         expect(result).toEqual([{ name: 'Weaviate', domain: 'weaviate.io' }]);
@@ -121,13 +139,13 @@ describe('seedCompetitors', () => {
     it('returns an empty array when the model returns nothing usable', async () => {
         mockCreate.mockResolvedValueOnce(json(JSON.stringify({ competitors: [{ name: 'Bad', domain: '' }] })));
 
-        expect(await seedCompetitors('mine.com', 20)).toEqual([]);
+        expect(await settle(async () => seedCompetitors('mine.com', 20))).toEqual([]);
     });
 
     it('returns an empty array when every LLM attempt fails', async () => {
         mockCreate.mockRejectedValue(new Error('boom'));
 
-        expect(await seedCompetitors('mine.com', 20)).toEqual([]);
+        expect(await settle(async () => seedCompetitors('mine.com', 20))).toEqual([]);
     });
 });
 
@@ -141,7 +159,7 @@ describe('extractNames', () => {
     it('returns [] rather than throwing when both attempts fail', async () => {
         mockCreate.mockRejectedValue(new Error('network blip'));
 
-        expect(await extractNames(page('...'))).toEqual([]);
+        expect(await settle(async () => extractNames(page('...')))).toEqual([]);
     });
 });
 
@@ -161,9 +179,9 @@ describe('isListPage', () => {
     it('fails OPEN on an LLM error: a wrongly-kept page beats a silent false negative', async () => {
         mockCreate.mockRejectedValue(new Error('rate limited'));
 
-        const result = await isListPage(page('...'));
+        const result = await settle(async () => isListPage(page('...')));
 
-        expect(mockCreate).toHaveBeenCalledTimes(2);
+        expect(mockCreate).toHaveBeenCalledTimes(3);
         expect(result).toBe(true);
     });
 
@@ -214,9 +232,9 @@ describe('describeCandidates', () => {
     it('degrades to an empty map, not a throw, when both attempts fail', async () => {
         mockCreate.mockRejectedValue(new Error('rate limited'));
 
-        const result = await describeCandidates([candidate('weaviate')]);
+        const result = await settle(async () => describeCandidates([candidate('weaviate')]));
 
-        expect(mockCreate).toHaveBeenCalledTimes(2);
+        expect(mockCreate).toHaveBeenCalledTimes(3);
         expect(result.size).toBe(0);
     });
 
