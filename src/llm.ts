@@ -32,8 +32,19 @@ export function stripFences(raw: string): string {
         .replace(/\s*```$/, '');
 }
 
+// The LLM is reached through the `apify/openrouter` Standby run, which is an Actor run like any
+// other: when the account is at its concurrent-run limit the call is rejected in milliseconds, so
+// retrying without a pause just spends every attempt inside the same busy moment and returns null.
+const LLM_ATTEMPTS = 3;
+const LLM_RETRY_MS = 3_000;
+
 async function completeJson<T>(prompt: string, schema: z.ZodSchema<T>, system: string): Promise<T | null> {
-    for (let attempt = 0; attempt < 2; attempt++) {
+    for (let attempt = 0; attempt < LLM_ATTEMPTS; attempt++) {
+        if (attempt > 0) {
+            await new Promise((resolve) => {
+                globalThis.setTimeout(resolve, LLM_RETRY_MS * attempt);
+            });
+        }
         try {
             const res = await getClient().chat.completions.create({
                 model: getModel(),

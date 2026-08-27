@@ -44,13 +44,53 @@ export async function abortChildren(): Promise<void> {
     log.info('Aborted child runs', { count: ids.length });
 }
 
+// Every plan caps concurrent Actor runs (5 on the free tier), and this run already spends two
+// slots: itself, plus the `apify/openrouter` Standby run behind the LLM calls. Exceeding the cap
+// rejects the start outright with HTTP 402, in under a second — fast enough that, untreated, one
+// busy moment shreds the whole competitor queue and every source reads as "has no integrations
+// page". A sibling finishing frees a slot within seconds, so the rejection is a queue, not an answer.
+const SLOT_LIMIT_ERROR = 'concurrent-runs-limit-exceeded';
+const SLOT_WAIT_MS = 90_000;
+
+async function sleep(ms: number): Promise<void> {
+    await new Promise((resolve) => {
+        globalThis.setTimeout(resolve, ms);
+    });
+}
+
+async function startWithSlotWait(
+    client: ReturnType<typeof Actor.newClient>,
+    input: Record<string, unknown>,
+    options: { memory: number; timeout: number },
+): Promise<{ id: string }> {
+    const deadline = Date.now() + SLOT_WAIT_MS;
+
+    for (let attempt = 0; ; attempt += 1) {
+        try {
+            return await client.actor(RAG_WEB_BROWSER).start(input, options);
+        } catch (err) {
+            if ((err as { type?: string }).type !== SLOT_LIMIT_ERROR) throw err;
+            if (Date.now() >= deadline) {
+                log.warning('Gave up waiting for a free Actor run slot — this source is unread, not absent', {
+                    query: input.query,
+                });
+                throw err;
+            }
+            log.debug('Waiting for a free Actor run slot', { query: input.query, attempt });
+            // Jittered, or workers rejected in the same burst all retry in lockstep and re-collide.
+            await sleep(Math.min(500 * 2 ** attempt, 5_000) + Math.random() * 500);
+        }
+    }
+}
+
 async function runRagBrowser(query: string, render: boolean, maxResults: number): Promise<RagItem[]> {
     const tool = render ? 'browser-playwright' : 'raw-http';
     const client = Actor.newClient();
     const startedAt = Date.now();
 
     // Not `call`: it returns the run only once it is over, and abortChildren needs the ID before then.
-    const started = await client.actor(RAG_WEB_BROWSER).start(
+    const started = await startWithSlotWait(
+        client,
         {
             query,
             maxResults,
