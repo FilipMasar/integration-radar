@@ -6,7 +6,7 @@ import type { Resolved } from '../src/web.js';
 import type { Deps, Input } from '../src/orchestrate.js';
 
 vi.mock('apify', () => ({
-    log: { info: vi.fn(), warning: vi.fn() },
+    log: { debug: vi.fn(), info: vi.fn(), warning: vi.fn() },
 }));
 
 const { runIntegrationRadar } = await import('../src/orchestrate.js');

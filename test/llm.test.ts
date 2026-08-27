@@ -10,7 +10,7 @@ vi.mock('openai', () => ({
 }));
 
 vi.mock('apify', () => ({
-    log: { info: vi.fn(), warning: vi.fn() },
+    log: { debug: vi.fn(), info: vi.fn(), warning: vi.fn() },
 }));
 
 const { describeCandidates, extractNames, isListPage, sanitizeCandidateName, seedCompetitors, stripFences } =

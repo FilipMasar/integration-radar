@@ -24,19 +24,36 @@ export interface Resolved {
 }
 
 async function runRagBrowser(query: string, render: boolean, maxResults: number): Promise<RagItem[]> {
+    const tool = render ? 'browser-playwright' : 'raw-http';
     const client = Actor.newClient();
+    const startedAt = Date.now();
+
     const run = await client.actor(RAG_WEB_BROWSER).call(
         {
             query,
             maxResults,
             outputFormats: ['markdown'],
-            scrapingTool: render ? 'browser-playwright' : 'raw-http',
+            scrapingTool: tool,
         },
-        // Live renders logged "memory critically overloaded" at the default; the timeout bounds a hang.
-        render ? { memory: 4096, timeout: 180 } : { memory: 1024, timeout: 60 },
+        {
+            // Live renders logged "memory critically overloaded" at the default; the timeout bounds a hang.
+            ...(render ? { memory: 4096, timeout: 180 } : { memory: 1024, timeout: 60 }),
+            // Any value but `null` streams the child's entire log into ours; the line below replaces it.
+            log: null,
+        },
     );
     const { items } = await client.dataset(run.defaultDatasetId).listItems();
-    return items as unknown as RagItem[];
+
+    const results = items as unknown as RagItem[];
+    log.info('rag-web-browser', {
+        query,
+        tool,
+        results: results.length,
+        chars: results.reduce((total, item) => total + (item.markdown?.length ?? 0), 0),
+        seconds: Math.round((Date.now() - startedAt) / 1000),
+        runId: run.id,
+    });
+    return results;
 }
 
 function toPageHit(item: RagItem, fallbackUrl: string): PageHit | null {
@@ -56,10 +73,7 @@ export function isThin(hit: PageHit | null): boolean {
 export async function fetchUrl(url: string): Promise<Resolved> {
     const key = cacheKey('page', url);
     const cached = await readCache(key);
-    if (cached) {
-        log.info('Cache hit', { url });
-        return { hit: cached, fromCache: true, key, tier: 'path' };
-    }
+    if (cached) return { hit: cached, fromCache: true, key, tier: 'path' };
 
     if (await readMiss(key)) {
         return { hit: null, fromCache: true, key, tier: 'path' };
@@ -75,11 +89,10 @@ export async function fetchUrl(url: string): Promise<Resolved> {
             finalAttemptCompleted = true;
             const hit = items.length ? toPageHit(items[0], url) : null;
             if (!isThin(hit)) {
-                log.info('Fetched', { url, render, chars: hit!.markdown.length });
                 await writeCache(key, hit!);
                 return { hit, fromCache: false, key, tier: 'path' };
             }
-            log.info('Thin result', { url, render, chars: hit?.markdown.length ?? 0 });
+            log.debug('Thin result', { url, render, chars: hit?.markdown.length ?? 0 });
         } catch (err) {
             log.warning('Fetch error', { url, render, error: (err as Error).message });
         }
@@ -104,10 +117,7 @@ export async function findIntegrations(domain: string): Promise<Resolved> {
     }
 
     const guess = await fetchUrl(`https://${domain}${INTEGRATIONS_PATH}`);
-    if (looksRight(guess.hit, keyword)) {
-        log.info('Resolved via path', { domain, url: guess.hit.url });
-        return guess;
-    }
+    if (looksRight(guess.hit, keyword)) return guess;
 
     const cached = await readCache(key);
     if (cached) return { hit: cached, fromCache: true, key, tier: 'search' };
@@ -119,7 +129,6 @@ export async function findIntegrations(domain: string): Promise<Resolved> {
         for (const item of items) {
             const hit = toPageHit(item, `https://${domain}`);
             if (looksRight(hit, keyword)) {
-                log.info('Resolved via search', { domain, url: hit.url });
                 await writeCache(key, hit);
                 return { hit, fromCache: false, key, tier: 'search' };
             }
@@ -128,7 +137,6 @@ export async function findIntegrations(domain: string): Promise<Resolved> {
         log.warning('Search error', { domain, error: (err as Error).message });
     }
 
-    log.warning('No list found', { domain });
     if (searchCompleted) await writeMiss(key);
     return { hit: null, fromCache: false, key, tier: null };
 }
