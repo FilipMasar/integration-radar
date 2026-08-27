@@ -29,13 +29,17 @@ vi.mock('apify', () => ({
     Actor: {
         newClient: () => ({
             actor: () => ({
-                call: async () => {
+                start: async () => {
                     const outcome = outcomes.shift();
                     if (!outcome) throw new Error('test bug: no mock outcome queued for this call');
                     if (outcome.throws) throw outcome.throws;
                     current = { items: outcome.items ?? [] };
-                    return { defaultDatasetId: 'ds' };
+                    return { id: 'child-run' };
                 },
+            }),
+            run: () => ({
+                waitForFinish: async () => ({ id: 'child-run', defaultDatasetId: 'ds' }),
+                abort: async () => undefined,
             }),
             dataset: () => ({
                 listItems: async () => ({ items: current?.items ?? [] }),
