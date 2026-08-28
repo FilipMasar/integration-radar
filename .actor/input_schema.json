@@ -27,8 +27,7 @@
             "description": "Optional. Explicit competitor domains, as bare domains such as \"rival.com\". When set, these are used instead of identifying competitors automatically.",
             "editor": "stringList",
             "default": [],
-            "prefill": [],
-            "patternValue": "^[a-z0-9.-]+\\.[a-z]{2,}$"
+            "prefill": []
         }
     },
     "required": ["companyDomain"]
