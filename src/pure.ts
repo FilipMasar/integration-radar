@@ -3,11 +3,6 @@ export interface Company {
     domain: string;
 }
 
-export interface PageHit {
-    url: string;
-    markdown: string;
-}
-
 export interface SourceList {
     name: string;
     names: string[];
@@ -31,8 +26,6 @@ export interface Memory {
     slugs: string[];
     sources: string[];
 }
-
-export const INTEGRATIONS_PATH = '/integrations';
 
 // prettier-ignore
 const STOPWORDS = new Set([
@@ -87,6 +80,14 @@ export function sourceName(raw: string): string {
 
 export const DOMAIN_RE = /^[a-z0-9.-]+\.[a-z]{2,}$/;
 
+// A company's own name reads as a gap otherwise: asked what HubSpot integrates with, a model
+// answers "Mailchimp", so every competitor "carries" Mailchimp and it tops Mailchimp's own report.
+// Two spellings, because the name can sit either side of the dot: browse.ai is "Browse AI".
+export function ownNames(domain: string): string[] {
+    const host = sourceName(domain);
+    return [host.split('.')[0], host.replace(/\./g, '-')];
+}
+
 export function normalizeCompetitors(raw: { name: string; domain: string }[]): Company[] {
     const cleaned = raw
         .map((c) => ({ name: c.name.trim(), domain: sourceName(c.domain) }))
@@ -124,6 +125,11 @@ export function rankCandidates(mine: string[], sources: SourceList[]): RawCandid
         .sort((a, b) => b.competitorCount - a.competitorCount || a.slug.localeCompare(b.slug));
 }
 
+// Bumped when the way integrations are gathered changes. Lists from the old page-reading pass are
+// not comparable with these, so a stored history from before the change must rebaseline once rather
+// than report the difference between two methods as NEW rows.
+const METHOD = 2;
+
 export function inputFingerprint(input: {
     companyDomain: string;
     maxCompetitors: number;
@@ -131,6 +137,7 @@ export function inputFingerprint(input: {
 }): string {
     // Sorting is safe only because the caller passes the post-cut set it actually reads.
     return JSON.stringify({
+        method: METHOD,
         companyDomain: sourceName(input.companyDomain),
         maxCompetitors: input.maxCompetitors,
         competitors: [...new Set((input.competitors ?? []).map(sourceName))].sort(),

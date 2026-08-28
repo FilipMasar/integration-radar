@@ -1,7 +1,7 @@
 {
     "source-analyzed": {
-        "eventTitle": "Source analyzed",
-        "eventDescription": "One integrations page was fetched fresh this run and its list extracted: either the company's own, or a competitor's. Pages served from cache are not charged.",
+        "eventTitle": "Company analyzed",
+        "eventDescription": "One company's integration list was looked up fresh this run: either the company's own, or a competitor's. Lists served from cache are not charged.",
         "eventPriceUsd": 0.02
     },
     "candidate-found": {

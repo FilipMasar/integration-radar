@@ -7,7 +7,7 @@
         "companyDomain": {
             "title": "Company domain",
             "type": "string",
-            "description": "The company to analyze, as a bare domain. Its competitors are identified automatically from the model's knowledge of the market, or supplied via the \"competitors\" input.",
+            "description": "The company to analyze, as a bare lowercase domain with no \"https://\". Its competitors are identified automatically, or supplied via the \"competitors\" input.",
             "editor": "textfield",
             "prefill": "apify.com",
             "pattern": "^[a-z0-9.-]+\\.[a-z]{2,}$"
@@ -15,7 +15,7 @@
         "maxCompetitors": {
             "title": "Maximum competitors",
             "type": "integer",
-            "description": "How many competitors to read. The competitor set is named most-direct-first, so a lower number keeps the closest competitors and drops the rest. Changing this makes the next run a fresh baseline rather than a NEW/SEEN diff.",
+            "description": "How many competitors to compare against. They are ordered most-direct-first, so a lower number keeps the closest competitors and drops the rest.",
             "editor": "number",
             "default": 20,
             "minimum": 1,
@@ -24,10 +24,11 @@
         "competitors": {
             "title": "Competitors",
             "type": "array",
-            "description": "Optional. Explicit competitor domains, as bare domains such as \"rival.com\". When set, these are used instead of asking the model to name competitors. Changing this list makes the next run a fresh baseline rather than a NEW/SEEN diff, because it changes what the run looks at.",
+            "description": "Optional. Explicit competitor domains, as bare domains such as \"rival.com\". When set, these are used instead of identifying competitors automatically.",
             "editor": "stringList",
             "default": [],
-            "prefill": []
+            "prefill": [],
+            "patternValue": "^[a-z0-9.-]+\\.[a-z]{2,}$"
         }
     },
     "required": ["companyDomain"]
