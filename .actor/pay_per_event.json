@@ -1,12 +1,12 @@
 {
     "source-analyzed": {
         "eventTitle": "Company analyzed",
-        "eventDescription": "One company's integration list was looked up fresh this run: either the company's own, or a competitor's. Lists served from cache are not charged.",
+        "eventDescription": "One company's integration list was looked up fresh this run \u2014 either your own company's, or a competitor's. Lists are cached for 24 hours, and cached lookups are free.",
         "eventPriceUsd": 0.02
     },
     "candidate-found": {
         "eventTitle": "Candidate found",
-        "eventDescription": "One candidate was written to the dataset.",
+        "eventDescription": "One integration your competitors offer and you don't, written to the dataset. Capped at 100 rows per run.",
         "eventPriceUsd": 0.02
     }
 }
