@@ -1,6 +1,6 @@
 import { log } from 'apify';
 
-import type { describeCandidates, extractNames, isListPage, seedCompetitors } from './llm.js';
+import type { describeCandidates, listIntegrations, seedCompetitors } from './llm.js';
 import type { Candidate, Company, Memory, SourceList } from './pure.js';
 import {
     diffAgainstPrevious,
@@ -8,20 +8,11 @@ import {
     mapLimit,
     mergeMemory,
     normalizeCompetitors,
+    ownNames,
     rankCandidates,
     sourceName,
 } from './pure.js';
-import type {
-    loadPrevious,
-    readListPageVerdict,
-    readNames,
-    readSeed,
-    savePrevious,
-    writeListPageVerdict,
-    writeNames,
-    writeSeed,
-} from './store.js';
-import type { findIntegrations, Resolved } from './web.js';
+import type { loadPrevious, readIntegrations, readSeed, savePrevious, writeIntegrations, writeSeed } from './store.js';
 
 export interface Input {
     companyDomain: string;
@@ -29,9 +20,7 @@ export interface Input {
     competitors?: string[];
 }
 
-export interface OutputRow extends Candidate {
-    weakEvidence: boolean;
-}
+export type OutputRow = Candidate;
 
 export interface RunSummary {
     rows: OutputRow[];
@@ -51,19 +40,16 @@ export interface ChargeOutcome {
     eventChargeLimitReached: boolean;
 }
 
-// Injected because importing `main.ts` runs `Actor.init()`, which would make the pipeline untestable.
+// Injected so the pipeline can be tested without the platform: the real ones open a key-value
+// store and call an LLM.
 export interface Deps {
-    findIntegrations: typeof findIntegrations;
     seedCompetitors: typeof seedCompetitors;
-    extractNames: typeof extractNames;
-    isListPage: typeof isListPage;
+    listIntegrations: typeof listIntegrations;
     describeCandidates: typeof describeCandidates;
-    readNames: typeof readNames;
-    writeNames: typeof writeNames;
+    readIntegrations: typeof readIntegrations;
+    writeIntegrations: typeof writeIntegrations;
     readSeed: typeof readSeed;
     writeSeed: typeof writeSeed;
-    readListPageVerdict: typeof readListPageVerdict;
-    writeListPageVerdict: typeof writeListPageVerdict;
     loadPrevious: typeof loadPrevious;
     savePrevious: typeof savePrevious;
     pushData: (rows: OutputRow[]) => Promise<void>;
@@ -71,7 +57,7 @@ export interface Deps {
     maxRows?: number;
 }
 
-const CONCURRENCY = 4;
+const CONCURRENCY = 8;
 const DEFAULT_MAX_ROWS = 100;
 
 const CHARGE_STATE_PRECEDENCE = ['capped', 'charged', 'inactive'] as const;
@@ -83,9 +69,7 @@ interface ResolvedInput {
 }
 
 // The platform validates input against the schema on every run, Console or API, but a local
-// `apify run` does not. Both guards run before anything is fetched or charged, so a bad
-// `maxCompetitors` cannot empty the competitor set at the cut below after the run has already
-// paid for the company's own page.
+// `apify run` does not. Both guards run before anything is looked up or charged.
 function resolveInput(input: Input): ResolvedInput {
     const maxCompetitors = input.maxCompetitors ?? 20;
     if (!Number.isInteger(maxCompetitors) || maxCompetitors < 1) {
@@ -122,22 +106,13 @@ async function chargeFor(
     return { outcome, state: 'capped' };
 }
 
-async function namesFor(deps: Deps, resolved: Resolved): Promise<string[]> {
-    const cached = await deps.readNames(resolved.key);
-    if (cached) return cached;
-    const names = await deps.extractNames(resolved.hit!);
-    if (names.length > 0) await deps.writeNames(resolved.key, names);
-    return names;
-}
+async function integrationsFor(deps: Deps, domain: string): Promise<{ names: string[]; fromCache: boolean }> {
+    const cached = await deps.readIntegrations(domain);
+    if (cached?.length) return { names: cached, fromCache: true };
 
-async function confirmed(deps: Deps, resolved: Resolved): Promise<Resolved> {
-    if (!resolved.hit || resolved.tier !== 'search') return resolved;
-
-    const cachedVerdict = await deps.readListPageVerdict(resolved.key);
-    const isList = cachedVerdict ?? (await deps.isListPage(resolved.hit));
-    if (cachedVerdict === null) await deps.writeListPageVerdict(resolved.key, isList);
-
-    return isList ? resolved : { ...resolved, hit: null };
+    const names = await deps.listIntegrations(domain);
+    if (names.length > 0) await deps.writeIntegrations(domain, names);
+    return { names, fromCache: false };
 }
 
 async function discoverCompetitors(
@@ -156,7 +131,7 @@ async function discoverCompetitors(
                     'Use bare domains such as "rival.com".',
             );
         }
-        log.info('Competitors from input', { count: discovered.length });
+        log.info('Competitors from input', { count: discovered.length, domains: discovered.map((c) => c.domain) });
         return discovered;
     }
 
@@ -169,7 +144,12 @@ async function discoverCompetitors(
         );
     }
     if (!cached) await deps.writeSeed(companyDomain, maxCompetitors, discovered);
-    log.info('Competitors from seed', { count: discovered.length, fromCache: cached !== null });
+    // The whole result rests on this list, so name it rather than counting it.
+    log.info('Competitors from seed', {
+        count: discovered.length,
+        fromCache: cached !== null,
+        domains: discovered.map((c) => c.domain),
+    });
     return discovered;
 }
 
@@ -203,37 +183,27 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
         competitors: competitors.map((c) => c.domain),
     });
 
-    const own = await confirmed(deps, await deps.findIntegrations(companyDomain));
-    if (!own.hit) throw new Error(`Could not read the integrations page for ${companyDomain}`);
-    const mine = await namesFor(deps, own);
-    if (mine.length === 0) throw new Error(`Extracted no integrations from ${own.hit.url}`);
+    const own = await integrationsFor(deps, companyDomain);
+    const mine = own.names;
+    if (mine.length === 0) {
+        throw new Error(
+            `Could not list any integrations for ${companyDomain}. ` +
+                'The model may not know this company well enough to compare it.',
+        );
+    }
     if (!own.fromCache) freshSources += 1;
-    log.info('Own integrations', { count: mine.length, url: own.hit.url });
-
-    const tierBySource = new Map<string, 'path' | 'search'>();
+    log.info('Own integrations', { count: mine.length, fromCache: own.fromCache });
 
     const results = await mapLimit(competitors, CONCURRENCY, async (competitor) => {
         try {
-            const resolved = await confirmed(deps, await deps.findIntegrations(competitor.domain));
-            if (!resolved.hit) {
-                log.info('Competitor skipped — no integrations page', { domain: competitor.domain });
-                return null;
-            }
-            const names = await namesFor(deps, resolved);
+            const { names, fromCache } = await integrationsFor(deps, competitor.domain);
             if (names.length === 0) {
-                log.info('Competitor skipped — nothing extracted', { domain: competitor.domain });
+                log.info('Competitor skipped — no integrations known', { domain: competitor.domain });
                 return null;
             }
-            if (!resolved.fromCache) freshSources += 1;
-            log.info('Competitor read', {
-                domain: competitor.domain,
-                count: names.length,
-                url: resolved.hit.url,
-                via: resolved.tier,
-            });
-            const name = sourceName(competitor.domain);
-            if (resolved.tier) tierBySource.set(name, resolved.tier);
-            return { name, names };
+            if (!fromCache) freshSources += 1;
+            log.info('Competitor read', { domain: competitor.domain, count: names.length, fromCache });
+            return { name: sourceName(competitor.domain), names };
         } catch (err) {
             // Store calls here are unguarded, and a throw would abort after paying for everything, before `pushData`.
             log.warning('Competitor failed — skipping it, not the run', {
@@ -246,7 +216,7 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
 
     const sources: SourceList[] = results.filter((r): r is NonNullable<typeof r> => r !== null);
     log.info('Competitors read', { resolved: sources.length, of: competitors.length });
-    if (sources.length === 0) throw new Error('No competitor integrations pages could be read.');
+    if (sources.length === 0) throw new Error('No integrations could be listed for any competitor.');
 
     const median = sources.map((s) => s.names.length).sort((a, b) => a - b)[Math.floor(sources.length / 2)];
     if (mine.length < median * 0.4) {
@@ -256,7 +226,7 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
         });
     }
 
-    const ranked = rankCandidates(mine, sources);
+    const ranked = rankCandidates([...mine, ...ownNames(companyDomain)], sources);
     const gaps = ranked.slice(0, maxRows);
     if (ranked.length > maxRows) log.warning('Candidate list truncated for display', { total: ranked.length, maxRows });
     log.info('Candidates', { count: gaps.length, totalRanked: ranked.length });
@@ -284,7 +254,6 @@ export async function runIntegrationRadar(input: Input, deps: Deps): Promise<Run
             description: d?.description ?? '',
             category: d?.category ?? 'unknown',
             status: isBaseline ? 'BASELINE' : tags.get(gap.slug)!,
-            weakEvidence: gap.carriedBy.some((name) => tierBySource.get(name) === 'search'),
         };
     });
 

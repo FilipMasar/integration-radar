@@ -1,25 +1,26 @@
 Integration Radar finds **the integrations your competitors offer and you don't**.
 
-Give it one company domain. It works out who that company competes with, reads each competitor's integrations page, and lists every third-party product they offer that the company doesn't — ranked by how many competitors offer it, with the source pages named so you can check any row.
+Give it one company domain. It works out who that company competes with, lists what each competitor integrates with, and reports every third-party product they offer that the company doesn't — ranked by how many competitors offer it.
 
 ## What does Integration Radar do?
 
 Enter a domain such as `apify.com`. In one run it:
 
 1. **Names the competitors** — from an AI model's knowledge of the market, or from a list you supply.
-2. **Finds each integrations page** — at `/integrations` first, then by searching the site.
-3. **Extracts the products** listed on every page it reads, including your own.
-4. **Diffs and ranks** what's missing, merging spelling variants so "AWS S3" and "Amazon S3" count once.
+2. **Lists what each one integrates with**, including your own company.
+3. **Diffs and ranks** what's missing, merging spelling variants so "AWS S3" and "Amazon S3" count once.
 
-Use it to decide what to integrate next, to track what competitors add over time, or to build an integrations landing page. Run it on demand or on a schedule, and send the results to Google Sheets, Slack or a webhook through Apify's integrations.
+It answers from the model's knowledge of these companies. No websites are crawled, which makes a run fast and cheap — and means the results reflect what the model knows rather than what a page says today. See [Limitations](#limitations).
+
+Use it to decide what to integrate next, or to sketch an integrations roadmap. Run it on demand or on a schedule, and send the results to Google Sheets, Slack or a webhook through Apify's integrations.
 
 ## Input
 
-| Field            | Type             | Required | Default | Description                                                                  |
-| ---------------- | ---------------- | -------- | ------- | ---------------------------------------------------------------------------- |
-| `companyDomain`  | string           | Yes      | —       | The company to analyze, as a bare domain: `apify.com`.                       |
-| `maxCompetitors` | integer          | No       | `20`    | How many competitors to read, 1 to 30. The set is ordered most-direct-first. |
-| `competitors`    | array of strings | No       | `[]`    | Explicit competitor domains. When set, these replace automatic discovery.    |
+| Field            | Type             | Required | Default | Description                                                               |
+| ---------------- | ---------------- | -------- | ------- | ------------------------------------------------------------------------- |
+| `companyDomain`  | string           | Yes      | —       | The company to analyze, as a bare domain: `apify.com`.                    |
+| `maxCompetitors` | integer          | No       | `20`    | How many competitors to compare against, 1 to 30. Most-direct-first.      |
+| `competitors`    | array of strings | No       | `[]`    | Explicit competitor domains. When set, these replace automatic discovery. |
 
 ```json
 {
@@ -43,49 +44,50 @@ One row per product your competitors offer and you don't, ranked by `competitorC
         "carriedBy": ["browse.ai", "phantombuster.com", "agenty.com", "dexi.io"],
         "description": "Cloud-based spreadsheet application for creating and editing tabular data.",
         "category": "spreadsheet",
-        "status": "SEEN",
-        "weakEvidence": false
+        "status": "SEEN"
     }
 ]
 ```
 
-| Field             | Description                                                                       |
-| ----------------- | --------------------------------------------------------------------------------- |
-| `candidate`       | The product name as it appeared on the competitor pages.                          |
-| `slug`            | Normalized name used to merge spelling variants.                                  |
-| `competitorCount` | How many competitors offer it. The ranking key, and your confidence column.       |
-| `carriedBy`       | The competitor domains it was found on. Open them to verify the row.              |
-| `description`     | One factual sentence on what the product is.                                      |
-| `category`        | Short label such as `crm`, `spreadsheet`, `vector-database`.                      |
-| `status`          | `BASELINE`, `NEW` or `SEEN` — see below.                                          |
-| `weakEvidence`    | `true` when a source page was found by site search rather than a predictable URL. |
+| Field             | Description                                                                 |
+| ----------------- | --------------------------------------------------------------------------- |
+| `candidate`       | The product name.                                                           |
+| `slug`            | Normalized name used to merge spelling variants.                            |
+| `competitorCount` | How many competitors offer it. The ranking key, and your confidence column. |
+| `carriedBy`       | The competitor domains it was attributed to.                                |
+| `description`     | One factual sentence on what the product is.                                |
+| `category`        | Short label such as `crm`, `spreadsheet`, `vector-database`.                |
+| `status`          | `BASELINE`, `NEW` or `SEEN` — see below.                                    |
 
 ### NEW, SEEN and BASELINE
 
-Each run saves what it found for that domain, and compares the next run against it.
+Each run saves what it found for that domain and compares the next run against it.
 
 - **First run:** every row is `BASELINE` — there's nothing to compare with yet.
 - **After that:** `NEW` if the row wasn't in the previous list, `SEEN` if it was.
 
-The comparison only holds if both runs read the same competitors, so changing `maxCompetitors` or `competitors` resets to `BASELINE` for one run. To track change over time, set the inputs once and leave them alone.
+The comparison only holds if both runs compare the same companies, so changing `maxCompetitors` or `competitors` resets to `BASELINE` for one run.
 
 ## How much does it cost?
 
 Pay-per-event, **$0.02** each:
 
-- **`source-analyzed`** — one integrations page fetched fresh and read. Cached pages (24 hours) and pages that never resolve are free.
+- **`source-analyzed`** — one company's integration list looked up. Lists are cached for 24 hours and cached lookups are free.
 - **`candidate-found`** — one row written to the dataset. Capped at 100 rows.
 
-A run on `apify.com` at the default `maxCompetitors: 20` read 11 pages — 10 of the 20 competitors had a findable page, plus `apify.com` itself — and yields roughly 60–90 rows, so **about $1.40 to $2.00**. Rows dominate the bill and are charged on every run.
+At the default `maxCompetitors: 20` a first run looks up at most 21 companies, so **$0.42 at most in lookups**, plus $0.02 per row. Rows dominate the bill: a full 100 rows is $2.00, giving a ceiling of **$2.42 per run**. A re-run within 24 hours pays only for rows.
+
+A run that fails charges nothing — events are billed only once rows are written.
 
 ## Limitations
 
-- Competitors come from an AI model's knowledge of the market, not a live search. One it doesn't know is never looked at; pass `competitors` to fix that.
-- Fewer than half of a typical competitor set publishes a findable integrations page. One that publishes none contributes nothing and costs nothing.
-- An integrations page shows what a company _publishes_, not everything it supports.
-- Names are extracted by a model, so one can be odd or wrong — one competitor's integrations page turned out to be proxy setup guides. Every row names its sources in `carriedBy`, so a click settles it.
-- The run fails outright if your own page can't be read, if no competitors can be determined, or if not one competitor page could be read. Each would otherwise produce a confidently wrong list.
+- **The answer comes from an AI model's knowledge, not from your competitors' websites.** Nothing is verified against a live page. Treat the output as a well-informed starting list to check, not as a source of record.
+- Coverage tracks how well-known a company is. A large company with a public integrations catalogue is described well; a small or very new one may return nothing, and is then skipped.
+- An integration added recently may be missing, because the model's knowledge has a cutoff.
+- A row with `competitorCount: 1` rests on a single competitor. Sort by `competitorCount` and treat the tail with suspicion.
+- Names can be wrong or oddly spelled. `carriedBy` names the competitors a row was attributed to, so you can sanity-check it.
+- The run fails outright if no integrations can be listed for your own company, if no competitors can be determined, or if not one competitor produced a list. Each would otherwise produce a confidently wrong list.
 
 ## Feedback and support
 
-Something looks wrong? Open an issue on the **Issues** tab with the run ID and the domain you ran. Integration Radar reads publicly published pages only — you're responsible for using the output in line with the terms of the sites involved.
+Something looks wrong? Open an issue on the **Issues** tab with the run ID and the domain you ran. You're responsible for using the output in line with the terms of the sites involved.

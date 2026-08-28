@@ -2,7 +2,7 @@ import { log } from 'apify';
 import OpenAI from 'openai';
 import { z } from 'zod';
 
-import type { Company, PageHit, RawCandidate } from './pure.js';
+import type { Company, RawCandidate } from './pure.js';
 import { normalizeCompetitors } from './pure.js';
 
 let client: OpenAI | null = null;
@@ -22,8 +22,6 @@ function getModel(): string {
     return process.env.LLM_MODEL ?? 'anthropic/claude-sonnet-4.5';
 }
 
-const MAX_CHARS = 40_000;
-
 // Anthropic models have no native json_object mode, so fenced replies arrive despite asking for one.
 export function stripFences(raw: string): string {
     return raw
@@ -36,6 +34,7 @@ export function stripFences(raw: string): string {
 // other: when the account is at its concurrent-run limit the call is rejected in milliseconds, so
 // retrying without a pause just spends every attempt inside the same busy moment and returns null.
 const LLM_ATTEMPTS = 3;
+const MAX_REPLY_TOKENS = 8_000;
 const LLM_RETRY_MS = 3_000;
 
 async function completeJson<T>(prompt: string, schema: z.ZodSchema<T>, system: string): Promise<T | null> {
@@ -50,6 +49,9 @@ async function completeJson<T>(prompt: string, schema: z.ZodSchema<T>, system: s
                 model: getModel(),
                 // Without this, NEW/SEEN measures sampling noise rather than change.
                 temperature: 0,
+                // Unset, the provider reserves the model's full output window (64k) and bills the
+                // reservation against the credit check. Every reply here is a short JSON list.
+                max_tokens: MAX_REPLY_TOKENS,
                 messages: [
                     { role: 'system', content: system },
                     { role: 'user', content: prompt },
@@ -66,8 +68,6 @@ async function completeJson<T>(prompt: string, schema: z.ZodSchema<T>, system: s
     }
     return null;
 }
-
-const EXTRACT_SYSTEM = 'You extract structured data from web pages. Reply with JSON only.';
 
 const CompetitorsSchema = z.object({
     competitors: z.array(z.object({ name: z.string(), domain: z.string() })),
@@ -100,51 +100,28 @@ Reply as {"competitors": [{"name": "...", "domain": "..."}]}`,
 
 const NamesSchema = z.object({ names: z.array(z.string()) });
 
-export async function extractNames(page: PageHit): Promise<string[]> {
+const MAX_INTEGRATIONS = 80;
+
+export async function listIntegrations(domain: string): Promise<string[]> {
     const result = await completeJson(
-        `This Markdown is from ${page.url}, a page listing third-party services, apps,
-tools or integrations.
+        `List up to ${MAX_INTEGRATIONS} third-party products, apps or services that the company at
+${domain} offers an integration or connector for.
 
-List the name of every third-party product or service on the page. Use each one's own
-canonical name ("Google Sheets", not "Sheets integration").
+Use each product's own canonical name ("Google Sheets", not "Sheets integration").
 
-Exclude the page owner's own products and features. Exclude navigation links, pricing
-tiers, blog posts, and generic capabilities such as "API", "Webhooks" or "CSV export".
+Exclude ${domain}'s own products and features. Exclude generic capabilities such as
+"API", "Webhooks", "CSV export" or "Email".
 
-Reply as {"names": ["...", "..."]}
+Only name an integration you are confident exists. If you do not know this company, or
+know of no integrations, reply with an empty list rather than guessing.
 
----
-${page.markdown.slice(0, MAX_CHARS)}`,
+Reply as {"names": ["...", "..."]}`,
         NamesSchema,
-        EXTRACT_SYSTEM,
+        "You list a company's integrations from your own knowledge of its product. Reply with JSON only.",
     );
 
     if (!result) return [];
-    return [...new Set(result.names.map((s) => s.trim()).filter(Boolean))];
-}
-
-const IsListSchema = z.object({ isList: z.boolean(), reason: z.string() });
-
-export async function isListPage(page: PageHit): Promise<boolean> {
-    const result = await completeJson(
-        `Does this page primarily present a list of third-party integrations, apps or connectors?
-
-Answer false if it is a product marketing or landing page, a pricing page, a docs
-homepage, a blog post, or a general overview that merely mentions such things.
-Answer true only if enumerating them is the page's main purpose.
-
-Reply as {"isList": true|false, "reason": "..."}
-
----
-${page.markdown.slice(0, 6000)}`,
-        IsListSchema,
-        EXTRACT_SYSTEM,
-    );
-
-    // Fail open: a page wrongly kept is visible noise, a page wrongly dropped is silent.
-    if (!result) return true;
-    if (!result.isList) log.debug('Rejected non-list page', { url: page.url, reason: result.reason });
-    return result.isList;
+    return [...new Set(result.names.map((s) => s.trim()).filter(Boolean))].slice(0, MAX_INTEGRATIONS);
 }
 
 const DescriptionsSchema = z.object({
