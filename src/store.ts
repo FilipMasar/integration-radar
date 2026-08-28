@@ -1,7 +1,7 @@
 import type { KeyValueStore } from 'apify';
 import { Actor, log } from 'apify';
 
-import type { Company, Memory, PageHit } from './pure.js';
+import type { Company, Memory } from './pure.js';
 import { sourceName } from './pure.js';
 
 // Named on purpose: unnamed stores are deleted once the run drops out of the 10 most recent.
@@ -28,7 +28,6 @@ export function ttlHours(raw: string | undefined, fallback: number): number {
 }
 
 const DEFAULT_CACHE_TTL_HOURS = 24;
-const DEFAULT_MISS_TTL_HOURS = 6;
 
 function ageHours(fetchedAt: string): number {
     return (Date.now() - new Date(fetchedAt).getTime()) / 3_600_000;
@@ -40,9 +39,7 @@ export function isExpired(fetchedAt: string, maxAgeHours: number): boolean {
 
 interface CacheRecord {
     fetchedAt: string;
-    hit: PageHit;
-    names?: string[];
-    isListPage?: boolean;
+    names: string[];
 }
 
 async function readFresh(key: string): Promise<CacheRecord | null> {
@@ -54,57 +51,20 @@ async function readFresh(key: string): Promise<CacheRecord | null> {
     return record;
 }
 
-async function patchRecord(key: string, fields: Partial<CacheRecord>): Promise<void> {
+function integrationsKey(domain: string): string {
+    return cacheKey('integrations', sourceName(domain));
+}
+
+export async function readIntegrations(domain: string): Promise<string[] | null> {
+    return (await readFresh(integrationsKey(domain)))?.names ?? null;
+}
+
+export async function writeIntegrations(domain: string, names: string[]): Promise<void> {
     const kv = await getStore();
-    const record = await kv.getValue<CacheRecord>(key);
-    if (record) await kv.setValue(key, { ...record, ...fields });
-}
-
-export async function readCache(key: string): Promise<PageHit | null> {
-    return (await readFresh(key))?.hit ?? null;
-}
-
-export async function writeCache(key: string, hit: PageHit): Promise<void> {
-    const kv = await getStore();
-    await kv.setValue(key, { fetchedAt: new Date().toISOString(), hit } satisfies CacheRecord);
-}
-
-export async function readNames(key: string): Promise<string[] | null> {
-    return (await readFresh(key))?.names ?? null;
-}
-
-export async function writeNames(key: string, names: string[]): Promise<void> {
-    await patchRecord(key, { names });
-}
-
-// `null`, not `false` — `false` is a real cached verdict, so the `?? null` must stay as it is.
-export async function readListPageVerdict(key: string): Promise<boolean | null> {
-    return (await readFresh(key))?.isListPage ?? null;
-}
-
-export async function writeListPageVerdict(key: string, isListPage: boolean): Promise<void> {
-    await patchRecord(key, { isListPage });
-}
-
-interface MissRecord {
-    missedAt: string;
-}
-
-function missKey(key: string): string {
-    return `${key}-miss`;
-}
-
-export async function readMiss(key: string): Promise<boolean> {
-    const kv = await getStore();
-    const record = await kv.getValue<MissRecord>(missKey(key));
-    if (!record) return false;
-
-    return !isExpired(record.missedAt, ttlHours(process.env.MISS_TTL_HOURS, DEFAULT_MISS_TTL_HOURS));
-}
-
-export async function writeMiss(key: string): Promise<void> {
-    const kv = await getStore();
-    await kv.setValue(missKey(key), { missedAt: new Date().toISOString() } satisfies MissRecord);
+    await kv.setValue(integrationsKey(domain), {
+        fetchedAt: new Date().toISOString(),
+        names,
+    } satisfies CacheRecord);
 }
 
 interface SeedRecord {

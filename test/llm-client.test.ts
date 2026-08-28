@@ -44,21 +44,21 @@ describe('OpenAI client construction timing', () => {
     });
 
     it('constructs the client lazily, on the first call that actually needs it', async () => {
-        const { extractNames } = await import('../src/llm.js');
+        const { listIntegrations } = await import('../src/llm.js');
         expect(constructorSpy).not.toHaveBeenCalled();
 
-        await extractNames({ url: 'https://example.com/integrations', markdown: '# integrations' });
+        await listIntegrations('rival.com');
 
         expect(constructorSpy).toHaveBeenCalledTimes(1);
     });
 
     it('reads LLM_API_KEY/LLM_BASE_URL freshly at first use, not from a value captured earlier', async () => {
-        const { extractNames } = await import('../src/llm.js');
+        const { listIntegrations } = await import('../src/llm.js');
 
         process.env.LLM_API_KEY = 'test-key-not-a-real-secret';
         process.env.LLM_BASE_URL = 'https://example.invalid/v1';
 
-        await extractNames({ url: 'https://example.com/integrations', markdown: '# integrations' });
+        await listIntegrations('rival.com');
 
         expect(constructorSpy).toHaveBeenCalledWith(
             expect.objectContaining({ apiKey: 'test-key-not-a-real-secret', baseURL: 'https://example.invalid/v1' }),

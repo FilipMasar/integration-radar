@@ -18,21 +18,14 @@ const {
     cacheKey,
     isExpired,
     loadPrevious,
-    readCache,
-    readListPageVerdict,
-    readMiss,
-    readNames,
+    readIntegrations,
     readSeed,
     savePrevious,
     ttlHours,
-    writeCache,
-    writeListPageVerdict,
-    writeMiss,
-    writeNames,
+    writeIntegrations,
     writeSeed,
 } = await import('../src/store.js');
 
-const PAGE = { url: 'https://example.com/integrations', markdown: 'hello' };
 const hoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
 
 describe('cacheKey', () => {
@@ -76,13 +69,11 @@ describe('ttlHours', () => {
 
 describe('isExpired', () => {
     it('is false for a record within the TTL window', () => {
-        const oneHourAgo = new Date(Date.now() - 1 * 3_600_000).toISOString();
-        expect(isExpired(oneHourAgo, 24)).toBe(false);
+        expect(isExpired(hoursAgo(1), 24)).toBe(false);
     });
 
     it('is true once age exceeds the TTL', () => {
-        const twentyFiveHoursAgo = new Date(Date.now() - 25 * 3_600_000).toISOString();
-        expect(isExpired(twentyFiveHoursAgo, 24)).toBe(true);
+        expect(isExpired(hoursAgo(25), 24)).toBe(true);
     });
 
     it('treats TTL 0 as a forced expiry for any real past record', () => {
@@ -91,143 +82,51 @@ describe('isExpired', () => {
     });
 });
 
-describe('readListPageVerdict / writeListPageVerdict', () => {
-    beforeEach(() => {
-        kvData.clear();
-    });
-
-    it('returns null when there is no page record at all', async () => {
-        expect(await readListPageVerdict('no-such-key')).toBeNull();
-    });
-
-    it('returns null — not false — when the page record exists but was never gated', async () => {
-        await writeCache('key-ungated', { url: 'https://example.com', markdown: 'hi' });
-        expect(await readListPageVerdict('key-ungated')).toBeNull();
-    });
-
-    it('round-trips a true verdict', async () => {
-        await writeCache('key-true', { url: 'https://example.com', markdown: 'hi' });
-        await writeListPageVerdict('key-true', true);
-        expect(await readListPageVerdict('key-true')).toBe(true);
-    });
-
-    it('round-trips a false verdict distinctly from "never gated"', async () => {
-        await writeCache('key-false', { url: 'https://example.com', markdown: 'hi' });
-        await writeListPageVerdict('key-false', false);
-        expect(await readListPageVerdict('key-false')).toBe(false);
-    });
-
-    it('never attaches a verdict to a page record that does not exist', async () => {
-        await writeListPageVerdict('never-fetched', true);
-        expect(await readListPageVerdict('never-fetched')).toBeNull();
-    });
-
-    it('expires the verdict on the same TTL as the page record it is attached to', async () => {
-        const twentyFiveHoursAgo = new Date(Date.now() - 25 * 3_600_000).toISOString();
-        kvData.set('key-stale', {
-            fetchedAt: twentyFiveHoursAgo,
-            hit: { url: 'https://example.com', markdown: 'hi' },
-            isListPage: true,
-        });
-        expect(await readListPageVerdict('key-stale')).toBeNull();
-    });
-});
-
-describe('readCache / writeCache', () => {
+describe('readIntegrations / writeIntegrations', () => {
     beforeEach(() => {
         kvData.clear();
         delete process.env.CACHE_TTL_HOURS;
     });
 
-    it('round-trips a page', async () => {
-        await writeCache('page-key', PAGE);
-        expect(await readCache('page-key')).toEqual(PAGE);
+    const NAMES = ['Slack', 'Notion'];
+
+    it('round-trips a list of names', async () => {
+        await writeIntegrations('rival.com', NAMES);
+        expect(await readIntegrations('rival.com')).toEqual(NAMES);
     });
 
-    it('returns null for a key that was never written', async () => {
-        expect(await readCache('never-written')).toBeNull();
+    it('returns null for a company that was never written', async () => {
+        expect(await readIntegrations('never-written.com')).toBeNull();
     });
 
-    it('returns null once the page is past the 24h TTL', async () => {
-        kvData.set('stale', { fetchedAt: hoursAgo(25), hit: PAGE });
-        expect(await readCache('stale')).toBeNull();
+    it('keys per company, so two domains cannot read each other', async () => {
+        await writeIntegrations('a.com', NAMES);
+        expect(await readIntegrations('b.com')).toBeNull();
     });
 
-    it('drops the extracted names and the gate verdict when the page is refetched', async () => {
-        await writeCache('key', PAGE);
-        await writeNames('key', ['Old Name']);
-        await writeListPageVerdict('key', true);
-
-        await writeCache('key', { url: PAGE.url, markdown: 'completely different content' });
-
-        expect(await readNames('key')).toBeNull();
-        expect(await readListPageVerdict('key')).toBeNull();
-        expect(await readCache('key')).toEqual({ url: PAGE.url, markdown: 'completely different content' });
-    });
-});
-
-describe('readNames / writeNames', () => {
-    beforeEach(() => {
-        kvData.clear();
-        delete process.env.CACHE_TTL_HOURS;
+    it('normalizes the domain so casing, scheme and www cannot fork the record', async () => {
+        await writeIntegrations('https://www.Rival.com/integrations', NAMES);
+        expect(await readIntegrations('rival.com')).toEqual(NAMES);
     });
 
-    it('round-trips names attached to an existing page record', async () => {
-        await writeCache('key', PAGE);
-        await writeNames('key', ['Slack', 'Notion']);
-        expect(await readNames('key')).toEqual(['Slack', 'Notion']);
+    it('returns null once the record is past the 24h TTL', async () => {
+        kvData.set(cacheKey('integrations', 'rival.com'), { fetchedAt: hoursAgo(25), names: NAMES });
+        expect(await readIntegrations('rival.com')).toBeNull();
     });
 
-    it('never attaches names to a page record that does not exist', async () => {
-        await writeNames('orphan', ['Slack']);
-        expect(await readNames('orphan')).toBeNull();
-        expect(await readCache('orphan')).toBeNull();
+    it('keeps a record still inside the 24h TTL', async () => {
+        kvData.set(cacheKey('integrations', 'rival.com'), { fetchedAt: hoursAgo(23), names: NAMES });
+        expect(await readIntegrations('rival.com')).toEqual(NAMES);
     });
 
-    it('expires the names on the same TTL as the page they came from', async () => {
-        kvData.set('stale', { fetchedAt: hoursAgo(25), hit: PAGE, names: ['Slack'] });
-        expect(await readNames('stale')).toBeNull();
-    });
-});
-
-describe('readMiss / writeMiss', () => {
-    beforeEach(() => {
-        kvData.clear();
-        delete process.env.CACHE_TTL_HOURS;
-        delete process.env.MISS_TTL_HOURS;
-    });
-
-    it('round-trips a miss under its own key, never inside the page record', async () => {
-        await writeMiss('key');
-        expect(await readMiss('key')).toBe(true);
-        expect(await readCache('key')).toBeNull();
-    });
-
-    it('is false for a key that never missed', async () => {
-        expect(await readMiss('never')).toBe(false);
-    });
-
-    it('reads the 6h miss TTL, not the 24h page TTL', async () => {
-        kvData.set('key-miss', { missedAt: hoursAgo(10) });
-        kvData.set('key', { fetchedAt: hoursAgo(10), hit: PAGE });
-
-        expect(await readMiss('key')).toBe(false);
-        expect(await readCache('key')).toEqual(PAGE);
-    });
-
-    it('honours MISS_TTL_HOURS and CACHE_TTL_HOURS independently', async () => {
-        kvData.set('key-miss', { missedAt: hoursAgo(1) });
-        kvData.set('key', { fetchedAt: hoursAgo(1), hit: PAGE });
+    it('honours a CACHE_TTL_HOURS override, so a run can force a refresh', async () => {
+        kvData.set(cacheKey('integrations', 'rival.com'), { fetchedAt: hoursAgo(1), names: NAMES });
 
         process.env.CACHE_TTL_HOURS = '0';
-        expect(await readCache('key')).toBeNull();
-        expect(await readMiss('key')).toBe(true);
+        expect(await readIntegrations('rival.com')).toBeNull();
 
         delete process.env.CACHE_TTL_HOURS;
-        process.env.MISS_TTL_HOURS = '0';
-        expect(await readMiss('key')).toBe(false);
-        expect(await readCache('key')).toEqual(PAGE);
-        delete process.env.MISS_TTL_HOURS;
+        expect(await readIntegrations('rival.com')).toEqual(NAMES);
     });
 });
 
@@ -235,7 +134,6 @@ describe('readSeed / writeSeed', () => {
     beforeEach(() => {
         kvData.clear();
         delete process.env.CACHE_TTL_HOURS;
-        delete process.env.MISS_TTL_HOURS;
     });
 
     const RIVALS = [{ name: 'Rival', domain: 'rival.com' }];
@@ -297,5 +195,13 @@ describe('loadPrevious / savePrevious', () => {
     it('reads a pre-fingerprint record as fingerprint null, not as a match', async () => {
         kvData.set(cacheKey('previous', 'apify.com'), { date: '2026-08-10', slugs: ['clay'] });
         expect(await loadPrevious('apify.com')).toEqual({ slugs: ['clay'], sources: [], fingerprint: null });
+    });
+
+    it('never expires, so a long gap between runs does not rebaseline', async () => {
+        await savePrevious('apify.com', { slugs: ['clay'], sources: ['n8n.io'], fingerprint: 'fp-1' }, '2025-01-01');
+        process.env.CACHE_TTL_HOURS = '0';
+
+        expect(await loadPrevious('apify.com')).toEqual({ slugs: ['clay'], sources: ['n8n.io'], fingerprint: 'fp-1' });
+        delete process.env.CACHE_TTL_HOURS;
     });
 });

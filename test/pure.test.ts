@@ -6,6 +6,7 @@ import {
     mergeMemory,
     normalizeCompetitors,
     normalizeName,
+    ownNames,
     rankCandidates,
     sourceName,
 } from '../src/pure.js';
@@ -161,6 +162,22 @@ describe('rankCandidates', () => {
         const ranked = rankCandidates([], s);
         expect(ranked.map((c) => c.competitorCount)).toEqual([1, 1]);
         expect(ranked.map((c) => c.slug)).toEqual(['aaa-first', 'zzz-last']);
+    });
+});
+
+describe('ownNames', () => {
+    it('gives both spellings of the company, since the name can sit either side of the dot', () => {
+        expect(ownNames('browse.ai')).toEqual(['browse', 'browse-ai']);
+        expect(ownNames('apify.com')).toEqual(['apify', 'apify-com']);
+    });
+
+    it('normalizes the domain first, so a URL or www prefix yields the same names', () => {
+        expect(ownNames('https://www.Apify.com/integrations')).toEqual(['apify', 'apify-com']);
+    });
+
+    it('keeps a competitor naming the analyzed company out of the ranking', () => {
+        const sources = [{ name: 'rival.com', names: ['Apify', 'Apify.com', 'Slack'] }];
+        expect(rankCandidates(ownNames('apify.com'), sources).map((c) => c.slug)).toEqual(['slack']);
     });
 });
 

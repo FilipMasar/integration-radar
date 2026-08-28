@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { PageHit, RawCandidate } from '../src/pure.js';
+import type { RawCandidate } from '../src/pure.js';
 
 const mockCreate = vi.hoisted(() => vi.fn());
 
@@ -13,12 +13,8 @@ vi.mock('apify', () => ({
     log: { debug: vi.fn(), info: vi.fn(), warning: vi.fn() },
 }));
 
-const { describeCandidates, extractNames, isListPage, sanitizeCandidateName, seedCompetitors, stripFences } =
+const { describeCandidates, listIntegrations, sanitizeCandidateName, seedCompetitors, stripFences } =
     await import('../src/llm.js');
-
-function page(markdown: string, url = 'https://example.com/integrations'): PageHit {
-    return { url, markdown };
-}
 
 function json(content: string) {
     return { choices: [{ message: { content } }] };
@@ -128,14 +124,6 @@ describe('seedCompetitors', () => {
         expect(sentPrompt()).toContain('7');
     });
 
-    it('does not tell the model it is reading a web page — there is none in this call', async () => {
-        mockCreate.mockResolvedValueOnce(json(JSON.stringify({ competitors: [] })));
-
-        await seedCompetitors('mine.com', 20);
-
-        expect(mockCreate.mock.calls[0][0].messages[0].content).not.toContain('web page');
-    });
-
     it('returns an empty array when the model returns nothing usable', async () => {
         mockCreate.mockResolvedValueOnce(json(JSON.stringify({ competitors: [{ name: 'Bad', domain: '' }] })));
 
@@ -149,48 +137,44 @@ describe('seedCompetitors', () => {
     });
 });
 
-describe('extractNames', () => {
+describe('listIntegrations', () => {
     it('trims whitespace, dedupes, and drops blank names', async () => {
         mockCreate.mockResolvedValueOnce(json(JSON.stringify({ names: [' Slack ', 'Slack', '', 'Google Sheets'] })));
 
-        expect(await extractNames(page('...'))).toEqual(['Slack', 'Google Sheets']);
+        expect(await listIntegrations('rival.com')).toEqual(['Slack', 'Google Sheets']);
     });
 
-    it('returns [] rather than throwing when both attempts fail', async () => {
+    it('caps the list, so one talkative reply cannot dominate the ranking', async () => {
+        const names = Array.from({ length: 200 }, (_, i) => `Product ${i}`);
+        mockCreate.mockResolvedValueOnce(json(JSON.stringify({ names })));
+
+        const result = await listIntegrations('rival.com');
+
+        expect(result).toHaveLength(80);
+        expect(result[0]).toBe('Product 0');
+    });
+
+    it('names the company it is asking about', async () => {
+        mockCreate.mockResolvedValueOnce(json(JSON.stringify({ names: [] })));
+
+        await listIntegrations('rival.com');
+
+        expect(sentPrompt()).toContain('rival.com');
+    });
+
+    it('returns [] rather than throwing when every attempt fails', async () => {
         mockCreate.mockRejectedValue(new Error('network blip'));
 
-        expect(await settle(async () => extractNames(page('...')))).toEqual([]);
-    });
-});
-
-describe('isListPage', () => {
-    it('returns false when the model judges the page not to be a list', async () => {
-        mockCreate.mockResolvedValueOnce(json(JSON.stringify({ isList: false, reason: 'product marketing page' })));
-
-        expect(await isListPage(page('...'))).toBe(false);
-    });
-
-    it('returns true when the model judges the page to be a list', async () => {
-        mockCreate.mockResolvedValueOnce(json(JSON.stringify({ isList: true, reason: 'enumerates integrations' })));
-
-        expect(await isListPage(page('...'))).toBe(true);
-    });
-
-    it('fails OPEN on an LLM error: a wrongly-kept page beats a silent false negative', async () => {
-        mockCreate.mockRejectedValue(new Error('rate limited'));
-
-        const result = await settle(async () => isListPage(page('...')));
+        const result = await settle(async () => listIntegrations('rival.com'));
 
         expect(mockCreate).toHaveBeenCalledTimes(3);
-        expect(result).toBe(true);
+        expect(result).toEqual([]);
     });
 
-    it('asks whether the page enumerates third-party integrations', async () => {
-        mockCreate.mockResolvedValueOnce(json(JSON.stringify({ isList: true, reason: 'x' })));
+    it('returns [] when the model replies with an empty list, without inventing anything', async () => {
+        mockCreate.mockResolvedValueOnce(json(JSON.stringify({ names: [] })));
 
-        await isListPage(page('...'));
-
-        expect(sentPrompt()).toContain('a list of third-party integrations, apps or connectors');
+        expect(await listIntegrations('unknown-company.com')).toEqual([]);
     });
 });
 

@@ -2,7 +2,7 @@
     "name": "integration-radar",
     "version": "0.0.1",
     "type": "module",
-    "description": "Finds integrations a company's competitors and the wider ecosystem have but it does not, and tags what is new since the last run.",
+    "description": "Finds the integrations a company's competitors offer and it does not, ranked by how many competitors offer each one.",
     "packageManager": "pnpm@10.28.0",
     "engines": {
         "node": ">=22.0.0"

@@ -5,26 +5,35 @@
         "overview": {
             "title": "Candidates",
             "transformation": {
-                "fields": [
-                    "candidate",
-                    "description",
-                    "category",
-                    "competitorCount",
-                    "status",
-                    "weakEvidence",
-                    "carriedBy"
-                ]
+                "fields": ["candidate", "description", "category", "competitorCount", "status", "carriedBy"]
             },
             "display": {
                 "component": "table",
                 "properties": {
-                    "candidate": { "label": "Name", "format": "text" },
-                    "description": { "label": "What it is", "format": "text" },
-                    "category": { "label": "Category", "format": "text" },
-                    "competitorCount": { "label": "Competitors", "format": "number" },
-                    "status": { "label": "Status", "format": "text" },
-                    "weakEvidence": { "label": "Weak evidence", "format": "boolean" },
-                    "carriedBy": { "label": "Found in", "format": "array" }
+                    "candidate": {
+                        "label": "Name",
+                        "format": "text"
+                    },
+                    "description": {
+                        "label": "What it is",
+                        "format": "text"
+                    },
+                    "category": {
+                        "label": "Category",
+                        "format": "text"
+                    },
+                    "competitorCount": {
+                        "label": "Competitors",
+                        "format": "number"
+                    },
+                    "status": {
+                        "label": "Status",
+                        "format": "text"
+                    },
+                    "carriedBy": {
+                        "label": "Found in",
+                        "format": "array"
+                    }
                 }
             }
         }
